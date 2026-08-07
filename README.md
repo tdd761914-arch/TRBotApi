@@ -118,9 +118,9 @@ the separate [`tdlib-compat` branch](https://github.com/tdd761914-arch/TRLib/tre
 while the TRLib `main` branch used here stays free of that code.
 
 The request layer recognizes the complete current method catalogue, while the
-bundled Test-DC transport only has direct implementations for the login and
-text-message smoke path. Before calling it a production-compatible Bot API
-server, add:
+bundled Test-DC transport only has direct implementations for login, logout,
+close and the text-message smoke path. Before calling it a production-compatible
+Bot API server, add:
 
 1. a production MTProto transport with DC migration, reconnect, server-salt
    repair and auth-key/session loading;

@@ -97,7 +97,7 @@ AST.
 ветка `main`, используемая здесь, остаётся лёгкой.
 
 HTTP-слой уже принимает полный каталог методов, но bundled Test-DC transport
-пока реализует только login/text smoke path. До фактической production-
+пока реализует login, logout, close и text smoke path. До фактической production-
 совместимости с полным Bot API нужны:
 
 1. production MTProto transport с DC migration, reconnect, server-salt repair

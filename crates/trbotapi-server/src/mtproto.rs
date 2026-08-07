@@ -11,7 +11,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use trbotapi_core::{Error, ErrorKind, Result, rpc_result_body, write_import_bot_authorization};
-use trlib_core::api::parse_auth_response;
+use trlib_core::api::{parse_auth_response, write_log_out};
 use trlib_core::auth_key::{AuthKeyHandshake, AuthKeyMaterial, RandomSource};
 use trlib_core::crypto::{AuthKeyRef, CryptoDirection, RustCrypto, SessionCrypto};
 use trlib_core::generated::messages::MESSAGES_SEND_MESSAGE;
@@ -32,6 +32,8 @@ const INPUT_PEER_SELF: ConstructorId = ConstructorId::new(0x7da07ec9);
 const INPUT_PEER_USER: ConstructorId = ConstructorId::new(0xdde8a54c);
 const INPUT_PEER_CHAT: ConstructorId = ConstructorId::new(0x35a95cb9);
 const INPUT_PEER_CHANNEL: ConstructorId = ConstructorId::new(0x20adaef8);
+const BOOL_TRUE: ConstructorId = ConstructorId::new(0x997275b5);
+const BOOL_FALSE: ConstructorId = ConstructorId::new(0xbc799737);
 
 const MAX_FRAME: usize = 1 << 20;
 
@@ -199,6 +201,32 @@ impl BotTransport for TestDcTransport {
         writer.write(b",\"type\":\"private\"},\"text\":\"\"}")?;
         Ok(writer.position())
     }
+
+    fn call_bot_api(&mut self, method: &str, _body: &[u8], output: &mut [u8]) -> Result<usize> {
+        if !method.eq_ignore_ascii_case("logOut") && !method.eq_ignore_ascii_case("close") {
+            return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+        }
+        let mut request = [0u8; 32];
+        let mut writer = Writer::new(&mut request);
+        write_log_out(&mut writer).map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        let length = self.call_raw(writer.written(), &mut response)?;
+        let mut cursor = Cursor::new(&response[..length]);
+        let result = cursor.read_constructor().map_err(Error::from)?;
+        match result {
+            BOOL_TRUE => write_bytes(output, b"true"),
+            BOOL_FALSE => write_bytes(output, b"false"),
+            _ => Err(Error::new(ErrorKind::Wire, 0, result.get())),
+        }
+    }
+}
+
+fn write_bytes(output: &mut [u8], value: &[u8]) -> Result<usize> {
+    if value.len() > output.len() {
+        return Err(Error::new(ErrorKind::OutputTooSmall, 0, value.len() as u32));
+    }
+    output[..value.len()].copy_from_slice(value);
+    Ok(value.len())
 }
 
 fn sent_message_values(input: &[u8]) -> Option<(i32, i32)> {
