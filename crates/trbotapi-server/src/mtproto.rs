@@ -20,8 +20,9 @@ use trlib_core::auth_key::{AuthKeyHandshake, AuthKeyMaterial, RandomSource};
 use trlib_core::crypto::{AuthKeyRef, CryptoDirection, RustCrypto, SessionCrypto};
 use trlib_core::generated::messages::{
     MESSAGES_DELETE_CHAT_USER, MESSAGES_EDIT_CHAT_ABOUT, MESSAGES_EDIT_CHAT_TITLE,
-    MESSAGES_FORWARD_MESSAGES, MESSAGES_SEND_MESSAGE, MESSAGES_SEND_REACTION, MESSAGES_SET_TYPING,
-    MESSAGES_UNPIN_ALL_MESSAGES, MESSAGES_UPDATE_PINNED_MESSAGE,
+    MESSAGES_FORWARD_MESSAGES, MESSAGES_GET_FULL_CHAT, MESSAGES_SEND_MESSAGE,
+    MESSAGES_SEND_REACTION, MESSAGES_SET_TYPING, MESSAGES_UNPIN_ALL_MESSAGES,
+    MESSAGES_UPDATE_PINNED_MESSAGE,
 };
 use trlib_core::generated::{
     INPUT_USER_SELF, REACTION_EMOJI, SEND_MESSAGE_CANCEL_ACTION,
@@ -50,6 +51,10 @@ const INPUT_PEER_CHAT: ConstructorId = ConstructorId::new(0x35a95cb9);
 const INPUT_PEER_CHANNEL: ConstructorId = ConstructorId::new(0x20adaef8);
 const BOOL_TRUE: ConstructorId = ConstructorId::new(0x997275b5);
 const BOOL_FALSE: ConstructorId = ConstructorId::new(0xbc799737);
+const MESSAGES_CHAT_FULL: ConstructorId = ConstructorId::new(0xe5d7d19c);
+const CHAT_FULL: ConstructorId = ConstructorId::new(0x2633421b);
+const CHAT_PARTICIPANTS: ConstructorId = ConstructorId::new(0x3cbc93f8);
+const CHAT_PARTICIPANTS_FORBIDDEN: ConstructorId = ConstructorId::new(0x8763d3e1);
 
 const MAX_FRAME: usize = 1 << 20;
 
@@ -265,6 +270,9 @@ impl BotTransport for TestDcTransport {
         }
         if method.eq_ignore_ascii_case("leaveChat") {
             return self.call_leave_chat(_body, output);
+        }
+        if method.eq_ignore_ascii_case("getChatMemberCount") {
+            return self.call_chat_member_count(_body, output);
         }
         Err(Error::new(ErrorKind::Unsupported, 0, 0))
     }
@@ -570,6 +578,27 @@ impl TestDcTransport {
         self.call_raw(writer.written(), &mut response)?;
         write_bytes(output, b"true")
     }
+
+    fn call_chat_member_count(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        if chat_id >= 0 || chat_id < -1_000_000_000_000 {
+            return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+        }
+        let mut request = [0u8; 64];
+        let mut writer = Writer::new(&mut request);
+        schema::serialize(
+            &mut writer,
+            MESSAGES_GET_FULL_CHAT,
+            &[schema::Value::Long(-chat_id)],
+        )
+        .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        let length = self.call_raw(writer.written(), &mut response)?;
+        let count = chat_participant_count(&response[..length])?;
+        let mut json = JsonWriter::new(output);
+        json.write_i64(i64::from(count))?;
+        Ok(json.position())
+    }
 }
 
 fn write_bytes(output: &mut [u8], value: &[u8]) -> Result<usize> {
@@ -586,6 +615,34 @@ fn bool_result(input: &[u8], output: &mut [u8]) -> Result<usize> {
         BOOL_TRUE => write_bytes(output, b"true"),
         BOOL_FALSE => write_bytes(output, b"false"),
         id => Err(Error::new(ErrorKind::Wire, 0, id.get())),
+    }
+}
+
+fn chat_participant_count(input: &[u8]) -> Result<i32> {
+    let mut cursor = Cursor::new(input);
+    if cursor.read_constructor().map_err(Error::from)? != MESSAGES_CHAT_FULL {
+        return Err(Error::new(ErrorKind::Wire, 0, 0));
+    }
+    if cursor.read_constructor().map_err(Error::from)? != CHAT_FULL {
+        return Err(Error::new(ErrorKind::Wire, 0, 0));
+    }
+    cursor.read_u32().map_err(Error::from)?;
+    cursor.read_i64().map_err(Error::from)?;
+    cursor.read_string().map_err(Error::from)?;
+    match cursor.read_constructor().map_err(Error::from)? {
+        CHAT_PARTICIPANTS => {
+            cursor.read_i64().map_err(Error::from)?;
+            if cursor.read_constructor().map_err(Error::from)? != VECTOR {
+                return Err(Error::new(ErrorKind::Wire, 0, 0));
+            }
+            let count = cursor.read_u32().map_err(Error::from)?;
+            if count > i32::MAX as u32 {
+                return Err(Error::new(ErrorKind::InvalidValue, 0, count));
+            }
+            Ok(count as i32)
+        }
+        CHAT_PARTICIPANTS_FORBIDDEN => Ok(0),
+        _ => Err(Error::new(ErrorKind::Wire, 0, 0)),
     }
 }
 
