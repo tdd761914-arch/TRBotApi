@@ -107,4 +107,51 @@ cargo check -p trbotapi-core --no-default-features --locked
 cargo build --release --locked -p trbotapi-server
 ```
 
+### Зафиксированный smoke-бенчмарк
+
+Ниже — измерения в development-контейнере 2026-08-07 с release-профилем
+проекта. Это benchmark reference edge, а не обещание production capacity:
+
+| Проверка | Результат |
+| --- | ---: |
+| Размер `target/release/trbotapi-server` | 463 696 байт |
+| ELF `text + data + bss` (`size`) | 449 102 байт |
+| 20 последовательных `getMe` POST, 2 worker, loopback | 1,149 с |
+| Среднее время запроса | 57,46 мс |
+| Запросов в секунду | 17,40 |
+
+HTTP-run использовал новое `curl`-соединение на каждый запрос и статический
+профиль `getMe`, поэтому измеряет parser, routing и запись ответа без сетевой
+задержки Telegram и MTProto-шифрования. Повторить его можно так (сервер уже
+должен слушать порт `18080`):
+
+```bash
+start=$(date +%s%N); i=0
+while [ "$i" -lt 20 ]; do
+  curl --max-time 2 --no-keepalive -fsS -o /dev/null \
+    -X POST 'http://127.0.0.1:18080/bot123456:replace-me/getMe' \
+    -H 'content-type: application/json' -d '{}'
+  i=$((i + 1))
+done
+end=$(date +%s%N)
+awk -v n=20 -v ns="$((end - start))" \
+  'BEGIN { printf "%.2f req/s, %.2f ms/request\n", n/(ns/1e9), ns/n/1e6 }'
+```
+
+Для живого запуска через Telegram Test DC передайте одноразовый test bot
+token и явно включите встроенный transport. Этот benchmark намеренно не
+запускается с credential, сохранённым в репозитории:
+
+```bash
+export TRBOTAPI_API_ID=29806415
+export TRBOTAPI_API_HASH='your-api-hash'
+export TRBOTAPI_BOT_TOKEN='test-bot-token'
+export TRBOTAPI_CONNECT_TEST_DC=1
+time cargo run --release -p trbotapi-server
+```
+
+Команда сначала должна завершить `auth.importBotAuthorization`, затем можно
+замерить `getMe`/`sendMessage` через работающий edge. Production DC routing и
+долгоживущий MTProto reactor в этот Test-DC smoke path не входят.
+
 TRBotApi распространяется под MIT.

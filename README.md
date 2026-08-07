@@ -130,4 +130,53 @@ cargo check -p trbotapi-core --no-default-features --locked
 cargo build --release --locked -p trbotapi-server
 ```
 
+### Recorded smoke benchmark
+
+The following numbers were recorded on the development container on 2026-08-07
+with the release profile above. They are a reference-edge measurement, not a
+capacity promise for a production Bot API deployment:
+
+| Check | Result |
+| --- | ---: |
+| `target/release/trbotapi-server` file size | 463,696 bytes |
+| ELF `text + data + bss` (`size`) | 449,102 bytes |
+| 20 sequential `getMe` POSTs, 2 workers, local loopback | 1.149 s |
+| Same run, mean/request | 57.46 ms |
+| Same run, requests/second | 17.40 |
+
+The HTTP run used one fresh `curl` connection per request and the static
+`getMe` profile, so it measures parsing, routing and response writing only; it
+does not include Telegram network latency or MTProto encryption. Reproduce it
+with the following command after starting the server on port `18080`:
+
+```bash
+start=$(date +%s%N); i=0
+while [ "$i" -lt 20 ]; do
+  curl --max-time 2 --no-keepalive -fsS -o /dev/null \
+    -X POST 'http://127.0.0.1:18080/bot123456:replace-me/getMe' \
+    -H 'content-type: application/json' -d '{}'
+  i=$((i + 1))
+done
+end=$(date +%s%N)
+awk -v n=20 -v ns="$((end - start))" \
+  'BEGIN { printf "%.2f req/s, %.2f ms/request\n", n/(ns/1e9), ns/n/1e6 }'
+```
+
+For a live Telegram Test-DC run, supply a disposable test bot token and opt in
+to the bundled transport. This benchmark is intentionally not run with a
+credential stored in the repository:
+
+```bash
+export TRBOTAPI_API_ID=29806415
+export TRBOTAPI_API_HASH='your-api-hash'
+export TRBOTAPI_BOT_TOKEN='test-bot-token'
+export TRBOTAPI_CONNECT_TEST_DC=1
+time cargo run --release -p trbotapi-server
+```
+
+The command must complete `auth.importBotAuthorization` before serving HTTP;
+record its wall time and then benchmark `getMe`/`sendMessage` against the
+running edge. Production DC routing and a long-lived MTProto reactor are not
+included in this Test-DC smoke path.
+
 TRBotApi is MIT licensed.
