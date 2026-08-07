@@ -117,10 +117,14 @@ This is not the TDLib compatibility branch.  TRLib's TDLib adapter now lives on
 the separate [`tdlib-compat` branch](https://github.com/tdd761914-arch/TRLib/tree/tdlib-compat),
 while the TRLib `main` branch used here stays free of that code.
 
-The request layer recognizes the complete current method catalogue, while the
-bundled Test-DC transport only has direct implementations for login, logout,
-close and the text-message smoke path. Before calling it a production-compatible
-Bot API server, add:
+The request layer recognizes the complete current method catalogue. The bundled
+Test-DC transport has direct mappings for login, `getMe`/text `sendMessage`,
+logout/close, message delete/forward/copy/edit/reaction, chat actions, and the
+basic-group title/description/pin/leave/member-count subset. The remaining
+media, sticker, payment, inline, business, passport and story methods are
+forwarded to the transport hook but still require their method-specific TL and
+Bot API result mappings. Before calling it a production-compatible Bot API
+server, add:
 
 1. a production MTProto transport with DC migration, reconnect, server-salt
    repair and auth-key/session loading;

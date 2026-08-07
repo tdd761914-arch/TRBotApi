@@ -96,9 +96,13 @@ AST.
 [`tdlib-compat`](https://github.com/tdd761914-arch/TRLib/tree/tdlib-compat), а
 ветка `main`, используемая здесь, остаётся лёгкой.
 
-HTTP-слой уже принимает полный каталог методов, но bundled Test-DC transport
-пока реализует login, logout, close и text smoke path. До фактической production-
-совместимости с полным Bot API нужны:
+HTTP-слой принимает полный каталог методов. Bundled Test-DC transport уже
+имеет mapping для login, `getMe`/текстового `sendMessage`, logout/close,
+delete/forward/copy/edit/reaction сообщений, chat actions и базового набора
+basic-group (title/description/pin/leave/member-count). Остальные media,
+sticker, payment, inline, business, passport и story методы проходят в transport
+hook, но требуют отдельных TL mapping и конвертации результата Bot API. До
+фактической production-совместимости с полным Bot API нужны:
 
 1. production MTProto transport с DC migration, reconnect, server-salt repair
    и загрузкой auth key/session;
