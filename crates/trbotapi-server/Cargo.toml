@@ -1,0 +1,15 @@
+[package]
+name = "trbotapi-server"
+description = "Small HTTP Bot API edge for TRLib MTProto sessions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+trbotapi-core = { path = "../trbotapi-core" }
+trlib-core.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

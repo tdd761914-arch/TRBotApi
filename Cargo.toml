@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    "crates/trbotapi-core",
+    "crates/trbotapi-server",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/tdd761914-arch/TRBotApi"
+
+[workspace.dependencies]
+trlib-core = { git = "https://github.com/tdd761914-arch/TRLib.git", rev = "470adff", default-features = false, features = [
+    "auth",
+    "auth-key",
+    "api-messages",
+    "api-users",
+    "api-updates",
+    "service",
+    "transport-intermediate",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false
+
+[profile.bench]
+inherits = "release"

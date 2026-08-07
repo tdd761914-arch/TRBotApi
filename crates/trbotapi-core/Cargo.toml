@@ -1,0 +1,18 @@
+[package]
+name = "trbotapi-core"
+description = "Bounded Bot API request/response and MTProto mapping core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+std = []
+
+[dependencies]
+trlib-core.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
