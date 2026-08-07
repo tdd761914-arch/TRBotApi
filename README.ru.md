@@ -12,7 +12,8 @@ TRBotApi — лёгкий HTTP-шлюз Telegram Bot API поверх zero-copy 
 
 ## Структура
 
-- `trbotapi-core` — `no_std` bounded JSON parser, Bot API envelopes,
+- `trbotapi-core` — `no_std` bounded JSON parser, полный текущий каталог из
+  185 имён [Bot API](https://core.telegram.org/bots/api#available-methods),
   `auth.importBotAuthorization`, `users.getFullUser`, text `sendMessage` и
   извлечение `rpc_result`.
 - `trbotapi-server` — небольшой HTTP/1.1 edge на `std`, per-bot locks,
@@ -40,10 +41,13 @@ curl -sS -X POST \
   -H 'content-type: application/json' -d '{}'
 ```
 
-Сейчас bounded parser принимает формы `getMe`, текстового `sendMessage`,
-`getUpdates`, `setWebhook`, `deleteWebhook`, `getWebhookInfo`,
-`answerCallbackQuery` и integer-id `getChat`. `getUpdates` пока является
-локальным queue hook: transport reactor должен заполнять его из MTProto updates.
+Все 185 текущих имён методов распознаются без учёта регистра. Для hot path
+(`getMe`, текстовый `sendMessage`, `getUpdates`, `setWebhook`,
+`deleteWebhook`, `getWebhookInfo`, `answerCallbackQuery` и integer-id `getChat`)
+есть bounded typed parser. Остальные методы передаются как заимствованный
+JSON в `BotTransport::call_bot_api`, поэтому MTProto reactor может добавлять
+mapping без изменения HTTP edge. `getUpdates` пока является локальным queue
+hook: transport reactor должен заполнять его из MTProto updates.
 
 Для smoke-подключения к Test DC нужно явно передать API credentials:
 
@@ -81,13 +85,20 @@ Reference edge не создаёт поток или blocking socket на каж
 поднимайте соединение по требованию; активные сессии распределяйте по shard
 reactors.
 
+Для собственного transport реализуйте оба метода trait: `call` для уже
+сериализованных TL-вызовов и `call_bot_api(method, body, output)` для полного
+каталога Bot API. `body` заимствуется из HTTP buffer и не превращается в JSON
+AST.
+
 ## Граница совместимости
 
 Это не TDLib-ветка. TDLib adapter TRLib вынесен в отдельную ветку
 [`tdlib-compat`](https://github.com/tdd761914-arch/TRLib/tree/tdlib-compat), а
 ветка `main`, используемая здесь, остаётся лёгкой.
 
-До production-совместимости с полным Bot API нужны:
+HTTP-слой уже принимает полный каталог методов, но bundled Test-DC transport
+пока реализует только login/text smoke path. До фактической production-
+совместимости с полным Bot API нужны:
 
 1. production MTProto transport с DC migration, reconnect, server-salt repair
    и загрузкой auth key/session;

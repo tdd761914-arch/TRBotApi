@@ -13,6 +13,11 @@ use trlib_core::api::{InputPeer, write_send_text_reply};
 use trlib_core::generated::{auth::AUTH_IMPORT_BOT_AUTHORIZATION, users::USERS_GET_FULL_USER};
 use trlib_core::tl::{ConstructorId, Cursor, Writer};
 
+mod bot_methods;
+
+use bot_methods::is_typed_method;
+pub use bot_methods::{BOT_API_METHOD_COUNT, BOT_API_METHODS, is_bot_api_method};
+
 /// Maximum JSON body accepted by the reference edge.
 pub const MAX_JSON_BYTES: usize = 64 * 1024;
 /// Maximum response body emitted by the reference edge.
@@ -94,9 +99,18 @@ impl From<trlib_core::Error> for Error {
     }
 }
 
-/// A bounded subset of Telegram Bot API requests.
+/// A bounded Telegram Bot API request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BotRequest<'a> {
+    /// A known Bot API method whose JSON is forwarded without an intermediate
+    /// AST.  The transport is responsible for parameter-to-MTProto mapping and
+    /// for writing the result object (without the outer `ok` envelope).
+    Generic {
+        /// Method spelling as it appeared in the request path.
+        method: &'a str,
+        /// Borrowed JSON object supplied by the HTTP caller.
+        body: &'a [u8],
+    },
     /// `getMe`.
     GetMe,
     /// Text `sendMessage` with standard boolean options and reply target.
@@ -161,13 +175,24 @@ pub enum BotRequest<'a> {
 /// Escaped JSON strings are rejected intentionally.  A gateway that needs
 /// arbitrary escaped text can decode into an application-owned scratch buffer
 /// before calling this function.
-pub fn parse_request<'a>(method: &str, input: &'a [u8]) -> Result<BotRequest<'a>> {
+pub fn parse_request<'a>(method: &'a str, input: &'a [u8]) -> Result<BotRequest<'a>> {
+    let input = if input.is_empty() { b"{}" } else { input };
     if input.len() > MAX_JSON_BYTES {
         return Err(Error::new(
             ErrorKind::LimitExceeded,
             0,
             MAX_JSON_BYTES as u32,
         ));
+    }
+    if !is_bot_api_method(method) {
+        return Err(Error::new(ErrorKind::MethodNotFound, 0, 0));
+    }
+    if !is_typed_method(method) {
+        validate_json_object(input)?;
+        return Ok(BotRequest::Generic {
+            method,
+            body: input,
+        });
     }
     let mut cursor = JsonCursor::new(input);
     cursor.expect(b'{')?;
@@ -238,45 +263,71 @@ pub fn parse_request<'a>(method: &str, input: &'a [u8]) -> Result<BotRequest<'a>
     }
     cursor.finish()?;
 
-    match method {
-        "getMe" => Ok(BotRequest::GetMe),
-        "sendMessage" => Ok(BotRequest::SendMessage {
+    if method.eq_ignore_ascii_case("getMe") {
+        Ok(BotRequest::GetMe)
+    } else if method.eq_ignore_ascii_case("sendMessage") {
+        Ok(BotRequest::SendMessage {
             chat_id: chat_id.ok_or_else(|| Error::missing(0))?,
             text: text.ok_or_else(|| Error::missing(0))?,
             message_thread_id,
             disable_notification,
             protect_content,
             reply_to_message_id,
-        }),
-        "getUpdates" => {
-            if limit == 0 || limit > 100 {
-                return Err(Error::new(ErrorKind::InvalidValue, 0, 100));
-            }
-            Ok(BotRequest::GetUpdates {
-                offset,
-                limit,
-                timeout,
-            })
+        })
+    } else if method.eq_ignore_ascii_case("getUpdates") {
+        if limit == 0 || limit > 100 {
+            return Err(Error::new(ErrorKind::InvalidValue, 0, 100));
         }
-        "setWebhook" => Ok(BotRequest::SetWebhook {
+        Ok(BotRequest::GetUpdates {
+            offset,
+            limit,
+            timeout,
+        })
+    } else if method.eq_ignore_ascii_case("setWebhook") {
+        Ok(BotRequest::SetWebhook {
             url: url.ok_or_else(|| Error::missing(0))?,
             drop_pending_updates,
-        }),
-        "deleteWebhook" => Ok(BotRequest::DeleteWebhook {
+        })
+    } else if method.eq_ignore_ascii_case("deleteWebhook") {
+        Ok(BotRequest::DeleteWebhook {
             drop_pending_updates,
-        }),
-        "getWebhookInfo" => Ok(BotRequest::GetWebhookInfo),
-        "answerCallbackQuery" => Ok(BotRequest::AnswerCallbackQuery {
+        })
+    } else if method.eq_ignore_ascii_case("getWebhookInfo") {
+        Ok(BotRequest::GetWebhookInfo)
+    } else if method.eq_ignore_ascii_case("answerCallbackQuery") {
+        Ok(BotRequest::AnswerCallbackQuery {
             callback_query_id: callback_query_id.ok_or_else(|| Error::missing(0))?,
             text: callback_text,
             show_alert,
             cache_time,
-        }),
-        "getChat" => Ok(BotRequest::GetChat {
+        })
+    } else if method.eq_ignore_ascii_case("getChat") {
+        Ok(BotRequest::GetChat {
             chat_id: chat_id.ok_or_else(|| Error::missing(0))?,
-        }),
-        _ => Err(Error::new(ErrorKind::MethodNotFound, 0, 0)),
+        })
+    } else {
+        // `is_typed_method` and the branches above intentionally stay in sync;
+        // reaching this arm means a new typed method was added without its
+        // parser, which is an unsupported build error rather than a 404.
+        Err(Error::new(ErrorKind::Unsupported, 0, 0))
     }
+}
+
+fn validate_json_object(input: &[u8]) -> Result<()> {
+    let mut cursor = JsonCursor::new(input);
+    cursor.expect(b'{')?;
+    if !cursor.consume(b'}')? {
+        loop {
+            cursor.skip_string()?;
+            cursor.expect(b':')?;
+            cursor.skip_value()?;
+            if cursor.consume(b'}')? {
+                break;
+            }
+            cursor.expect(b',')?;
+        }
+    }
+    cursor.finish()
 }
 
 /// Writes a successful empty Bot API response.
@@ -669,6 +720,45 @@ impl<'a> JsonCursor<'a> {
         Err(Error::invalid_json(self.position))
     }
 
+    fn skip_string(&mut self) -> Result<()> {
+        self.expect(b'"')?;
+        while let Some(byte) = self.input.get(self.position).copied() {
+            self.position += 1;
+            match byte {
+                b'"' => return Ok(()),
+                b'\\' => {
+                    let escaped = self
+                        .input
+                        .get(self.position)
+                        .copied()
+                        .ok_or_else(|| Error::invalid_json(self.position))?;
+                    self.position += 1;
+                    if escaped == b'u' {
+                        for _ in 0..4 {
+                            let digit = self
+                                .input
+                                .get(self.position)
+                                .copied()
+                                .ok_or_else(|| Error::invalid_json(self.position))?;
+                            if !digit.is_ascii_hexdigit() {
+                                return Err(Error::invalid_json(self.position));
+                            }
+                            self.position += 1;
+                        }
+                    } else if !matches!(
+                        escaped,
+                        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't'
+                    ) {
+                        return Err(Error::invalid_json(self.position - 1));
+                    }
+                }
+                0..=0x1f => return Err(Error::invalid_json(self.position - 1)),
+                _ => {}
+            }
+        }
+        Err(Error::invalid_json(self.position))
+    }
+
     fn read_bool(&mut self) -> Result<bool> {
         self.skip_space();
         if self.input[self.position..].starts_with(b"true") {
@@ -754,12 +844,12 @@ impl<'a> JsonCursor<'a> {
 
     fn skip_value(&mut self) -> Result<()> {
         match self.peek() {
-            Some(b'"') => self.read_string().map(|_| ()),
+            Some(b'"') => self.skip_string(),
             Some(b'{') => {
                 self.expect(b'{')?;
                 if !self.consume(b'}')? {
                     loop {
-                        self.read_string()?;
+                        self.skip_string()?;
                         self.expect(b':')?;
                         self.skip_value()?;
                         if self.consume(b'}')? {
@@ -803,8 +893,8 @@ impl<'a> JsonCursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BotRequest, ErrorKind, parse_request, write_error, write_import_bot_authorization,
-        write_ok_user,
+        BOT_API_METHOD_COUNT, BotRequest, ErrorKind, is_bot_api_method, parse_request, write_error,
+        write_import_bot_authorization, write_ok_user,
     };
 
     #[test]
@@ -828,9 +918,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_escaped_strings_and_limits_updates() {
+    fn rejects_escaped_typed_strings_and_limits_updates() {
         assert_eq!(
-            parse_request("getMe", br#"{"x":"a\\nb"}"#)
+            parse_request("sendMessage", br#"{"chat_id":7,"text":"a\\nb"}"#)
                 .expect_err("escape")
                 .kind,
             ErrorKind::InvalidJson
@@ -840,6 +930,32 @@ mod tests {
                 .expect_err("limit")
                 .kind,
             ErrorKind::InvalidValue
+        );
+    }
+
+    #[test]
+    fn routes_the_full_method_catalogue_without_copying_json() {
+        assert_eq!(BOT_API_METHOD_COUNT, 185);
+        assert!(is_bot_api_method("sendRichMessage"));
+        assert!(is_bot_api_method("SENDRICHMESSAGE"));
+        assert_eq!(
+            parse_request("logOut", b""),
+            Ok(BotRequest::Generic {
+                method: "logOut",
+                body: b"{}"
+            })
+        );
+        let request = parse_request(
+            "setChatTitle",
+            br#"{"chat_id":-7,"title":"escaped \"title\""}"#,
+        )
+        .expect("generic method");
+        assert_eq!(
+            request,
+            BotRequest::Generic {
+                method: "setChatTitle",
+                body: br#"{"chat_id":-7,"title":"escaped \"title\""}"#,
+            }
         );
     }
 

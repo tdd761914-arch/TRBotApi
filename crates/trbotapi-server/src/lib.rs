@@ -36,6 +36,14 @@ static REQUEST_ID: AtomicI64 = AtomicI64::new(1);
 pub trait BotTransport: Send {
     /// Sends one boxed MTProto method and writes a Bot API result object.
     fn call(&mut self, method: &[u8], output: &mut [u8]) -> Result<usize>;
+
+    /// Handles any method from the Bot API catalogue with its original JSON
+    /// object.  Implementations can map the borrowed fields directly into a
+    /// schema writer; no JSON AST or owned request copy is required.  The
+    /// default keeps older transports source-compatible while they migrate.
+    fn call_bot_api(&mut self, _method: &str, _body: &[u8], _output: &mut [u8]) -> Result<usize> {
+        Err(Error::new(ErrorKind::Unsupported, 0, 0))
+    }
 }
 
 /// Minimal bot identity retained by the edge.
@@ -222,6 +230,15 @@ pub fn dispatch(
     let request = parse_request(method, body)?;
     let mut entry = entry.lock().expect("bot entry poisoned");
     match request {
+        BotRequest::Generic { method, body } => {
+            let transport = entry
+                .transport
+                .as_mut()
+                .ok_or_else(|| Error::new(ErrorKind::InvalidState, 0, 0))?;
+            let mut result = [0u8; MAX_RESPONSE_BYTES];
+            let result_length = transport.call_bot_api(method, body, &mut result)?;
+            write_ok_raw(output, &result[..result_length])
+        }
         BotRequest::GetMe => {
             let mut tl = [0u8; 64];
             let _ = trbotapi_core::write_get_me(&mut tl)?;
@@ -503,7 +520,32 @@ fn append_json_string(output: &mut Vec<u8>, value: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BotEntry, BotInfo, BotRegistry, dispatch};
+    use super::{BotEntry, BotInfo, BotRegistry, BotTransport, dispatch};
+
+    struct GenericTransport;
+
+    impl BotTransport for GenericTransport {
+        fn call(&mut self, _method: &[u8], _output: &mut [u8]) -> trbotapi_core::Result<usize> {
+            Err(trbotapi_core::Error::new(
+                trbotapi_core::ErrorKind::Unsupported,
+                0,
+                0,
+            ))
+        }
+
+        fn call_bot_api(
+            &mut self,
+            method: &str,
+            body: &[u8],
+            output: &mut [u8],
+        ) -> trbotapi_core::Result<usize> {
+            assert_eq!(method, "setChatTitle");
+            assert!(body.windows(7).any(|window| window == b"chat_id"));
+            let result = b"true";
+            output[..result.len()].copy_from_slice(result);
+            Ok(result.len())
+        }
+    }
 
     #[test]
     fn registry_dispatches_get_me_without_network() {
@@ -521,5 +563,29 @@ mod tests {
         let body = core::str::from_utf8(&output[..length]).expect("json");
         assert!(body.contains("tr_bot"));
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn registry_forwards_every_catalogued_method_to_transport() {
+        let registry = BotRegistry::new();
+        registry.register(
+            "1:secret".into(),
+            BotEntry::new(BotInfo {
+                id: 7,
+                first_name: "TR Bot".into(),
+                username: Some("tr_bot".into()),
+            })
+            .with_transport(Box::new(GenericTransport)),
+        );
+        let mut output = [0u8; 512];
+        let length = dispatch(
+            &registry,
+            "1:secret",
+            "setChatTitle",
+            br#"{"chat_id":-7,"title":"New title"}"#,
+            &mut output,
+        )
+        .expect("generic method");
+        assert_eq!(&output[..length], br#"{"ok":true,"result":true}"#);
     }
 }

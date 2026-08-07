@@ -14,6 +14,7 @@ evented acceptor, sharded bot registry and a persistent MTProto reactor.
 ## Layout
 
 - `trbotapi-core` — `no_std` bounded Bot API request parsing, JSON responses,
+  the current 185-method [Bot API catalogue](https://core.telegram.org/bots/api#available-methods),
   `auth.importBotAuthorization`, `users.getFullUser`, text `sendMessage`, and
   `rpc_result` extraction.  All buffers are supplied by the caller.
 - `trbotapi-server` — a small `std` HTTP/1.1 reference edge, per-bot locking,
@@ -42,11 +43,14 @@ curl -sS -X POST \
   -H 'content-type: application/json' -d '{}'
 ```
 
-The route shape and response envelope follow the Bot API.  The current edge
-implements bounded request shapes for `getMe`, text `sendMessage`,
-`getUpdates`, `setWebhook`, `deleteWebhook`, `getWebhookInfo`,
-`answerCallbackQuery`, and integer-id `getChat`.  `getUpdates` is currently a
-local queue hook; a transport reactor must feed it from MTProto updates.
+The route shape and response envelope follow the Bot API.  All 185 current
+method names are recognized case-insensitively.  The eight hot-path methods
+(`getMe`, text `sendMessage`, `getUpdates`, `setWebhook`, `deleteWebhook`,
+`getWebhookInfo`, `answerCallbackQuery`, and integer-id `getChat`) have bounded
+typed parsing in the core.  The remaining methods are passed as borrowed JSON
+to `BotTransport::call_bot_api`, so an embedding MTProto reactor can add a
+mapping without changing the HTTP edge. `getUpdates` is currently a local
+queue hook; a transport reactor must feed it from MTProto updates.
 
 For a Test-DC smoke connection, provide API credentials and opt in explicitly:
 
@@ -92,6 +96,13 @@ impl BotTransport for MyMtprotoReactor {
         // result object into `output` after rpc_result/update decoding.
         # todo!()
     }
+
+    fn call_bot_api(&mut self, method: &str, body: &[u8], output: &mut [u8])
+        -> trbotapi_core::Result<usize> {
+        // Map any of the 185 catalogued Bot API methods to TL and render the
+        // result object directly into `output`.
+        # todo!()
+    }
 }
 ```
 
@@ -106,8 +117,10 @@ This is not the TDLib compatibility branch.  TRLib's TDLib adapter now lives on
 the separate [`tdlib-compat` branch](https://github.com/tdd761914-arch/TRLib/tree/tdlib-compat),
 while the TRLib `main` branch used here stays free of that code.
 
-The current TRBotApi request layer is intentionally a Bot API subset.  Before
-calling it a production-compatible Bot API server, add:
+The request layer recognizes the complete current method catalogue, while the
+bundled Test-DC transport only has direct implementations for the login and
+text-message smoke path. Before calling it a production-compatible Bot API
+server, add:
 
 1. a production MTProto transport with DC migration, reconnect, server-salt
    repair and auth-key/session loading;
