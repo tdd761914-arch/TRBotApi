@@ -164,7 +164,7 @@ dependencies = [
 [[package]]
 name = "trlib-core"
 version = "0.1.0"
-source = "git+https://github.com/tdd761914-arch/TRLib.git?rev=470adff#470adff97d1124cedd02cebaa5189d15560c77fd"
+source = "git+https://github.com/tdd761914-arch/TRLib.git?rev=eb8af74#eb8af74592a276bb2282652f458b28e4f502ac93"
 dependencies = [
  "aes",
  "crypto-bigint",

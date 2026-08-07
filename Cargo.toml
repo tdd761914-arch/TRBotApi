@@ -13,7 +13,7 @@ license = "MIT"
 repository = "https://github.com/tdd761914-arch/TRBotApi"
 
 [workspace.dependencies]
-trlib-core = { git = "https://github.com/tdd761914-arch/TRLib.git", rev = "470adff", default-features = false, features = [
+trlib-core = { git = "https://github.com/tdd761914-arch/TRLib.git", rev = "eb8af74", default-features = false, features = [
     "auth",
     "auth-key",
     "api-messages",
