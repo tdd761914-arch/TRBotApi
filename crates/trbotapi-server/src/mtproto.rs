@@ -19,14 +19,17 @@ use trlib_core::api::{
 use trlib_core::auth_key::{AuthKeyHandshake, AuthKeyMaterial, RandomSource};
 use trlib_core::crypto::{AuthKeyRef, CryptoDirection, RustCrypto, SessionCrypto};
 use trlib_core::generated::messages::{
-    MESSAGES_EDIT_CHAT_TITLE, MESSAGES_SEND_MESSAGE, MESSAGES_SEND_REACTION, MESSAGES_SET_TYPING,
+    MESSAGES_DELETE_CHAT_USER, MESSAGES_EDIT_CHAT_ABOUT, MESSAGES_EDIT_CHAT_TITLE,
+    MESSAGES_SEND_MESSAGE, MESSAGES_SEND_REACTION, MESSAGES_SET_TYPING,
+    MESSAGES_UNPIN_ALL_MESSAGES, MESSAGES_UPDATE_PINNED_MESSAGE,
 };
 use trlib_core::generated::{
-    REACTION_EMOJI, SEND_MESSAGE_CANCEL_ACTION, SEND_MESSAGE_CHOOSE_CONTACT_ACTION,
-    SEND_MESSAGE_CHOOSE_STICKER_ACTION, SEND_MESSAGE_GEO_LOCATION_ACTION,
-    SEND_MESSAGE_RECORD_AUDIO_ACTION, SEND_MESSAGE_RECORD_VIDEO_ACTION, SEND_MESSAGE_TYPING_ACTION,
-    SEND_MESSAGE_UPLOAD_AUDIO_ACTION, SEND_MESSAGE_UPLOAD_DOCUMENT_ACTION,
-    SEND_MESSAGE_UPLOAD_PHOTO_ACTION, SEND_MESSAGE_UPLOAD_VIDEO_ACTION,
+    INPUT_USER_SELF, REACTION_EMOJI, SEND_MESSAGE_CANCEL_ACTION,
+    SEND_MESSAGE_CHOOSE_CONTACT_ACTION, SEND_MESSAGE_CHOOSE_STICKER_ACTION,
+    SEND_MESSAGE_GEO_LOCATION_ACTION, SEND_MESSAGE_RECORD_AUDIO_ACTION,
+    SEND_MESSAGE_RECORD_VIDEO_ACTION, SEND_MESSAGE_TYPING_ACTION, SEND_MESSAGE_UPLOAD_AUDIO_ACTION,
+    SEND_MESSAGE_UPLOAD_DOCUMENT_ACTION, SEND_MESSAGE_UPLOAD_PHOTO_ACTION,
+    SEND_MESSAGE_UPLOAD_VIDEO_ACTION,
 };
 use trlib_core::mtproto::{
     ExternalEnvelope, OutboundMessage, encode_encrypted, parse_decrypted, parse_external,
@@ -242,6 +245,20 @@ impl BotTransport for TestDcTransport {
         if method.eq_ignore_ascii_case("setChatTitle") {
             return self.call_set_chat_title(_body, output);
         }
+        if method.eq_ignore_ascii_case("setChatDescription") {
+            return self.call_set_chat_description(_body, output);
+        }
+        if method.eq_ignore_ascii_case("pinChatMessage")
+            || method.eq_ignore_ascii_case("unpinChatMessage")
+        {
+            return self.call_pin_message(method, _body, output);
+        }
+        if method.eq_ignore_ascii_case("unpinAllChatMessages") {
+            return self.call_unpin_all(_body, output);
+        }
+        if method.eq_ignore_ascii_case("leaveChat") {
+            return self.call_leave_chat(_body, output);
+        }
         Err(Error::new(ErrorKind::Unsupported, 0, 0))
     }
 }
@@ -386,6 +403,97 @@ impl TestDcTransport {
         self.call_raw(writer.written(), &mut response)?;
         write_bytes(output, b"true")
     }
+
+    fn call_set_chat_description(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        let about = json_string(body, "description")?;
+        let peer = schema_peer(chat_id, self.bot_id)?;
+        let mut request = [0u8; 512];
+        let mut writer = Writer::new(&mut request);
+        schema::serialize(
+            &mut writer,
+            MESSAGES_EDIT_CHAT_ABOUT,
+            &[schema::Value::Peer(peer), schema::Value::Str(about)],
+        )
+        .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        let length = self.call_raw(writer.written(), &mut response)?;
+        bool_result(&response[..length], output)
+    }
+
+    fn call_pin_message(&mut self, method: &str, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        let message_id = json_i64(body, "message_id")? as i32;
+        let peer = schema_peer(chat_id, self.bot_id)?;
+        let unpin = method.eq_ignore_ascii_case("unpinChatMessage");
+        let silent = json_bool(body, "disable_notification").unwrap_or(false);
+        let mut request = [0u8; 256];
+        let mut writer = Writer::new(&mut request);
+        schema::serialize(
+            &mut writer,
+            MESSAGES_UPDATE_PINNED_MESSAGE,
+            &[
+                if silent {
+                    schema::Value::True
+                } else {
+                    schema::Value::False
+                },
+                if unpin {
+                    schema::Value::True
+                } else {
+                    schema::Value::False
+                },
+                schema::Value::False,
+                schema::Value::Peer(peer),
+                schema::Value::Int(message_id),
+            ],
+        )
+        .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        self.call_raw(writer.written(), &mut response)?;
+        write_bytes(output, b"true")
+    }
+
+    fn call_unpin_all(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let peer = schema_peer(json_i64(body, "chat_id")?, self.bot_id)?;
+        let mut request = [0u8; 128];
+        let mut writer = Writer::new(&mut request);
+        schema::serialize(
+            &mut writer,
+            MESSAGES_UNPIN_ALL_MESSAGES,
+            &[
+                schema::Value::Peer(peer),
+                schema::Value::Skip,
+                schema::Value::Skip,
+            ],
+        )
+        .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        self.call_raw(writer.written(), &mut response)?;
+        write_bytes(output, b"true")
+    }
+
+    fn call_leave_chat(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        if chat_id >= 0 || chat_id < -1_000_000_000_000 {
+            return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+        }
+        let mut request = [0u8; 128];
+        let mut writer = Writer::new(&mut request);
+        schema::serialize(
+            &mut writer,
+            MESSAGES_DELETE_CHAT_USER,
+            &[
+                schema::Value::False,
+                schema::Value::Long(-chat_id),
+                schema::Value::Empty(INPUT_USER_SELF),
+            ],
+        )
+        .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        self.call_raw(writer.written(), &mut response)?;
+        write_bytes(output, b"true")
+    }
 }
 
 fn write_bytes(output: &mut [u8], value: &[u8]) -> Result<usize> {
@@ -477,6 +585,17 @@ fn json_string<'a>(input: &'a [u8], key: &str) -> Result<&'a str> {
         return Err(Error::new(ErrorKind::Unsupported, 0, 0));
     }
     core::str::from_utf8(&value[1..end]).map_err(|_| Error::new(ErrorKind::InvalidValue, 0, 0))
+}
+
+fn json_bool(input: &[u8], key: &str) -> Option<bool> {
+    let value = json_field(input, key)?;
+    if value.starts_with(b"true") {
+        Some(true)
+    } else if value.starts_with(b"false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn json_message_ids(input: &[u8], key: &str) -> Result<([i32; 100], usize)> {
