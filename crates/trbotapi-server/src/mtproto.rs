@@ -10,15 +10,28 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use trbotapi_core::{Error, ErrorKind, Result, rpc_result_body, write_import_bot_authorization};
-use trlib_core::api::{parse_auth_response, write_log_out};
+use trbotapi_core::{
+    Error, ErrorKind, Result, input_peer_for_chat, rpc_result_body, write_import_bot_authorization,
+};
+use trlib_core::api::{
+    parse_auth_response, write_delete_messages, write_edit_message_text, write_log_out,
+};
 use trlib_core::auth_key::{AuthKeyHandshake, AuthKeyMaterial, RandomSource};
 use trlib_core::crypto::{AuthKeyRef, CryptoDirection, RustCrypto, SessionCrypto};
-use trlib_core::generated::messages::MESSAGES_SEND_MESSAGE;
+use trlib_core::generated::messages::{
+    MESSAGES_EDIT_CHAT_TITLE, MESSAGES_SEND_MESSAGE, MESSAGES_SEND_REACTION, MESSAGES_SET_TYPING,
+};
+use trlib_core::generated::{
+    REACTION_EMOJI, SEND_MESSAGE_CANCEL_ACTION, SEND_MESSAGE_CHOOSE_CONTACT_ACTION,
+    SEND_MESSAGE_CHOOSE_STICKER_ACTION, SEND_MESSAGE_GEO_LOCATION_ACTION,
+    SEND_MESSAGE_RECORD_AUDIO_ACTION, SEND_MESSAGE_RECORD_VIDEO_ACTION, SEND_MESSAGE_TYPING_ACTION,
+    SEND_MESSAGE_UPLOAD_AUDIO_ACTION, SEND_MESSAGE_UPLOAD_DOCUMENT_ACTION,
+    SEND_MESSAGE_UPLOAD_PHOTO_ACTION, SEND_MESSAGE_UPLOAD_VIDEO_ACTION,
+};
 use trlib_core::mtproto::{
     ExternalEnvelope, OutboundMessage, encode_encrypted, parse_decrypted, parse_external,
 };
-use trlib_core::tl::{ConstructorId, Cursor, Writer};
+use trlib_core::tl::{ConstructorId, Cursor, Writer, schema};
 use trlib_core::transport::{Framing, Intermediate};
 
 use crate::BotTransport;
@@ -50,6 +63,12 @@ pub struct TestDcTransport {
 }
 
 impl TestDcTransport {
+    /// Associates the transport with the bot user id used for `inputPeerSelf`.
+    pub fn with_bot_id(mut self, bot_id: i64) -> Self {
+        self.bot_id = bot_id;
+        self
+    }
+
     /// Authenticates a bot on Test DC 2 using `auth.importBotAuthorization`.
     pub fn connect(
         api_id: i32,
@@ -203,9 +222,32 @@ impl BotTransport for TestDcTransport {
     }
 
     fn call_bot_api(&mut self, method: &str, _body: &[u8], output: &mut [u8]) -> Result<usize> {
-        if !method.eq_ignore_ascii_case("logOut") && !method.eq_ignore_ascii_case("close") {
-            return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+        if method.eq_ignore_ascii_case("logOut") || method.eq_ignore_ascii_case("close") {
+            return self.call_logout(output);
         }
+        if method.eq_ignore_ascii_case("deleteMessage")
+            || method.eq_ignore_ascii_case("deleteMessages")
+        {
+            return self.call_delete_messages(_body, output);
+        }
+        if method.eq_ignore_ascii_case("sendChatAction") {
+            return self.call_chat_action(_body, output);
+        }
+        if method.eq_ignore_ascii_case("setMessageReaction") {
+            return self.call_message_reaction(_body, output);
+        }
+        if method.eq_ignore_ascii_case("editMessageText") {
+            return self.call_edit_message_text(_body, output);
+        }
+        if method.eq_ignore_ascii_case("setChatTitle") {
+            return self.call_set_chat_title(_body, output);
+        }
+        Err(Error::new(ErrorKind::Unsupported, 0, 0))
+    }
+}
+
+impl TestDcTransport {
+    fn call_logout(&mut self, output: &mut [u8]) -> Result<usize> {
         let mut request = [0u8; 32];
         let mut writer = Writer::new(&mut request);
         write_log_out(&mut writer).map_err(Error::from)?;
@@ -219,6 +261,131 @@ impl BotTransport for TestDcTransport {
             _ => Err(Error::new(ErrorKind::Wire, 0, result.get())),
         }
     }
+
+    fn call_delete_messages(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let (ids, id_count) = if let Ok(values) = json_message_ids(body, "message_ids") {
+            values
+        } else {
+            let mut values = [0i32; 100];
+            values[0] = json_i64(body, "message_id")? as i32;
+            (values, 1)
+        };
+        let mut request = [0u8; 2 * 1024];
+        let mut writer = Writer::new(&mut request);
+        write_delete_messages(&mut writer, &ids[..id_count], true).map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        self.call_raw(writer.written(), &mut response)?;
+        write_bytes(output, b"true")
+    }
+
+    fn call_chat_action(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        let action = json_string(body, "action")?;
+        let peer = schema_peer(chat_id, self.bot_id)?;
+        let action_id = match action {
+            "typing" => SEND_MESSAGE_TYPING_ACTION,
+            "upload_photo" => SEND_MESSAGE_UPLOAD_PHOTO_ACTION,
+            "record_video" | "record_video_note" => SEND_MESSAGE_RECORD_VIDEO_ACTION,
+            "upload_video" | "upload_video_note" => SEND_MESSAGE_UPLOAD_VIDEO_ACTION,
+            "record_voice" => SEND_MESSAGE_RECORD_AUDIO_ACTION,
+            "upload_voice" => SEND_MESSAGE_UPLOAD_AUDIO_ACTION,
+            "upload_document" => SEND_MESSAGE_UPLOAD_DOCUMENT_ACTION,
+            "choose_sticker" => SEND_MESSAGE_CHOOSE_STICKER_ACTION,
+            "choose_contact" => SEND_MESSAGE_CHOOSE_CONTACT_ACTION,
+            "find_location" => SEND_MESSAGE_GEO_LOCATION_ACTION,
+            "cancel" => SEND_MESSAGE_CANCEL_ACTION,
+            _ => return Err(Error::new(ErrorKind::InvalidValue, 0, 0)),
+        };
+        let mut request = [0u8; 256];
+        let mut writer = Writer::new(&mut request);
+        schema::serialize(
+            &mut writer,
+            MESSAGES_SET_TYPING,
+            &[
+                schema::Value::Peer(peer),
+                schema::Value::Skip,
+                schema::Value::Empty(action_id),
+            ],
+        )
+        .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        let length = self.call_raw(writer.written(), &mut response)?;
+        bool_result(&response[..length], output)
+    }
+
+    fn call_message_reaction(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        let message_id = json_i64(body, "message_id")? as i32;
+        let reaction = json_string(body, "emoji").or_else(|_| json_string(body, "reaction"))?;
+        let peer = schema_peer(chat_id, self.bot_id)?;
+        let mut reaction_body = [0u8; 128];
+        let mut reaction_writer = Writer::new(&mut reaction_body);
+        reaction_writer.write_i32(1).map_err(Error::from)?;
+        reaction_writer
+            .write_constructor(REACTION_EMOJI)
+            .map_err(Error::from)?;
+        reaction_writer
+            .write_string(reaction)
+            .map_err(Error::from)?;
+        let mut request = [0u8; 512];
+        let mut writer = Writer::new(&mut request);
+        schema::serialize(
+            &mut writer,
+            MESSAGES_SEND_REACTION,
+            &[
+                schema::Value::False,
+                schema::Value::False,
+                schema::Value::Peer(peer),
+                schema::Value::Int(message_id),
+                schema::Value::Raw(VECTOR, reaction_writer.written()),
+            ],
+        )
+        .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        self.call_raw(writer.written(), &mut response)?;
+        write_bytes(output, b"true")
+    }
+
+    fn call_edit_message_text(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        let message_id = json_i64(body, "message_id")? as i32;
+        let text = json_string(body, "text")?;
+        let peer = core_peer(chat_id, self.bot_id)?;
+        let mut request = [0u8; 8 * 1024];
+        let mut writer = Writer::new(&mut request);
+        write_edit_message_text(&mut writer, peer, message_id, text, false, false)
+            .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        self.call_raw(writer.written(), &mut response)?;
+        let mut json = JsonWriter::new(output);
+        json.write(b"{\"message_id\":")?;
+        json.write_i64(i64::from(message_id))?;
+        json.write(b",\"date\":0,\"chat\":{\"id\":")?;
+        json.write_i64(chat_id)?;
+        json.write(b",\"type\":\"private\"},\"text\":")?;
+        json.write_json_string(text)?;
+        json.write(b"}")?;
+        Ok(json.position())
+    }
+
+    fn call_set_chat_title(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        let title = json_string(body, "title")?;
+        if chat_id >= 0 || chat_id < -1_000_000_000_000 {
+            return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+        }
+        let mut request = [0u8; 512];
+        let mut writer = Writer::new(&mut request);
+        schema::serialize(
+            &mut writer,
+            MESSAGES_EDIT_CHAT_TITLE,
+            &[schema::Value::Long(chat_id), schema::Value::Str(title)],
+        )
+        .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        self.call_raw(writer.written(), &mut response)?;
+        write_bytes(output, b"true")
+    }
 }
 
 fn write_bytes(output: &mut [u8], value: &[u8]) -> Result<usize> {
@@ -227,6 +394,127 @@ fn write_bytes(output: &mut [u8], value: &[u8]) -> Result<usize> {
     }
     output[..value.len()].copy_from_slice(value);
     Ok(value.len())
+}
+
+fn bool_result(input: &[u8], output: &mut [u8]) -> Result<usize> {
+    let mut cursor = Cursor::new(input);
+    match cursor.read_constructor().map_err(Error::from)? {
+        BOOL_TRUE => write_bytes(output, b"true"),
+        BOOL_FALSE => write_bytes(output, b"false"),
+        id => Err(Error::new(ErrorKind::Wire, 0, id.get())),
+    }
+}
+
+fn core_peer(chat_id: i64, bot_id: i64) -> Result<trlib_core::api::InputPeer> {
+    input_peer_for_chat(chat_id, Some(bot_id), None).map_err(|error| error)
+}
+
+fn schema_peer(chat_id: i64, bot_id: i64) -> Result<schema::Peer> {
+    match core_peer(chat_id, bot_id)? {
+        trlib_core::api::InputPeer::SelfPeer => Ok(schema::Peer::Self_),
+        trlib_core::api::InputPeer::Chat { chat_id } => Ok(schema::Peer::Chat { chat_id }),
+        trlib_core::api::InputPeer::User { .. } | trlib_core::api::InputPeer::Channel { .. } => {
+            Err(Error::new(ErrorKind::Unsupported, 0, 0))
+        }
+    }
+}
+
+fn json_field<'a>(input: &'a [u8], key: &str) -> Option<&'a [u8]> {
+    let key = key.as_bytes();
+    let width = key.len().checked_add(2)?;
+    let marker = input.windows(width).position(|window| {
+        window.first() == Some(&b'"')
+            && window.last() == Some(&b'"')
+            && &window[1..width - 1] == key
+    })?;
+    let mut position = marker + width;
+    while matches!(input.get(position), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+        position += 1;
+    }
+    if input.get(position) != Some(&b':') {
+        return None;
+    }
+    position += 1;
+    while matches!(input.get(position), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+        position += 1;
+    }
+    Some(&input[position..])
+}
+
+fn json_i64(input: &[u8], key: &str) -> Result<i64> {
+    let value = json_field(input, key).ok_or_else(|| Error::new(ErrorKind::MissingField, 0, 0))?;
+    let value = if value.first() == Some(&b'"') {
+        let end = value[1..]
+            .iter()
+            .position(|byte| *byte == b'"')
+            .ok_or_else(|| Error::new(ErrorKind::InvalidJson, 0, 0))?
+            + 1;
+        &value[1..end]
+    } else {
+        let end = value
+            .iter()
+            .position(|byte| matches!(*byte, b',' | b'}' | b']' | b' ' | b'\n' | b'\r' | b'\t'))
+            .unwrap_or(value.len());
+        &value[..end]
+    };
+    core::str::from_utf8(value)
+        .map_err(|_| Error::new(ErrorKind::InvalidValue, 0, 0))?
+        .parse::<i64>()
+        .map_err(|_| Error::new(ErrorKind::InvalidValue, 0, 0))
+}
+
+fn json_string<'a>(input: &'a [u8], key: &str) -> Result<&'a str> {
+    let value = json_field(input, key).ok_or_else(|| Error::new(ErrorKind::MissingField, 0, 0))?;
+    if value.first() != Some(&b'"') {
+        return Err(Error::new(ErrorKind::InvalidValue, 0, 0));
+    }
+    let end = value[1..]
+        .iter()
+        .position(|byte| *byte == b'"')
+        .ok_or_else(|| Error::new(ErrorKind::InvalidJson, 0, 0))?
+        + 1;
+    if value[1..end].contains(&b'\\') {
+        return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+    }
+    core::str::from_utf8(&value[1..end]).map_err(|_| Error::new(ErrorKind::InvalidValue, 0, 0))
+}
+
+fn json_message_ids(input: &[u8], key: &str) -> Result<([i32; 100], usize)> {
+    let value = json_field(input, key).ok_or_else(|| Error::new(ErrorKind::MissingField, 0, 0))?;
+    if value.first() != Some(&b'[') {
+        return Err(Error::new(ErrorKind::InvalidValue, 0, 0));
+    }
+    let mut ids = [0i32; 100];
+    let mut count = 0usize;
+    let mut position = 1usize;
+    loop {
+        while matches!(
+            value.get(position),
+            Some(b' ' | b'\n' | b'\r' | b'\t' | b',')
+        ) {
+            position += 1;
+        }
+        if value.get(position) == Some(&b']') {
+            break;
+        }
+        if count == ids.len() {
+            return Err(Error::new(ErrorKind::LimitExceeded, 0, 100));
+        }
+        let start = position;
+        while matches!(value.get(position), Some(b'-' | b'0'..=b'9')) {
+            position += 1;
+        }
+        let number = core::str::from_utf8(&value[start..position])
+            .map_err(|_| Error::new(ErrorKind::InvalidValue, start, 0))?
+            .parse::<i32>()
+            .map_err(|_| Error::new(ErrorKind::InvalidValue, start, 0))?;
+        ids[count] = number;
+        count += 1;
+    }
+    if count == 0 {
+        return Err(Error::new(ErrorKind::InvalidValue, 0, 0));
+    }
+    Ok((ids, count))
 }
 
 fn sent_message_values(input: &[u8]) -> Option<(i32, i32)> {
@@ -386,5 +674,20 @@ impl<'a> JsonWriter<'a> {
     fn write_i64(&mut self, value: i64) -> Result<()> {
         let value = value.to_string();
         self.write(value.as_bytes())
+    }
+
+    fn write_json_string(&mut self, value: &str) -> Result<()> {
+        self.write(b"\"")?;
+        for byte in value.bytes() {
+            match byte {
+                b'"' => self.write(b"\\\"")?,
+                b'\\' => self.write(b"\\\\")?,
+                b'\n' => self.write(b"\\n")?,
+                b'\r' => self.write(b"\\r")?,
+                b'\t' => self.write(b"\\t")?,
+                _ => self.write(&[byte])?,
+            }
+        }
+        self.write(b"\"")
     }
 }

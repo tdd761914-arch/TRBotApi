@@ -40,7 +40,8 @@ fn main() {
                 .expect("TRBOTAPI_TEST_DC must be host:port");
             eprintln!("connecting bot session to Test DC at {address}");
             let transport = TestDcTransport::connect(api_id, &api_hash, &token, address)
-                .expect("Test DC bot authorization failed");
+                .expect("Test DC bot authorization failed")
+                .with_bot_id(id);
             entry = entry.with_transport(Box::new(transport));
         }
         registry.register(token, entry);
