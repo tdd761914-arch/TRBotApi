@@ -20,7 +20,7 @@ use trlib_core::auth_key::{AuthKeyHandshake, AuthKeyMaterial, RandomSource};
 use trlib_core::crypto::{AuthKeyRef, CryptoDirection, RustCrypto, SessionCrypto};
 use trlib_core::generated::messages::{
     MESSAGES_DELETE_CHAT_USER, MESSAGES_EDIT_CHAT_ABOUT, MESSAGES_EDIT_CHAT_TITLE,
-    MESSAGES_SEND_MESSAGE, MESSAGES_SEND_REACTION, MESSAGES_SET_TYPING,
+    MESSAGES_FORWARD_MESSAGES, MESSAGES_SEND_MESSAGE, MESSAGES_SEND_REACTION, MESSAGES_SET_TYPING,
     MESSAGES_UNPIN_ALL_MESSAGES, MESSAGES_UPDATE_PINNED_MESSAGE,
 };
 use trlib_core::generated::{
@@ -236,6 +236,13 @@ impl BotTransport for TestDcTransport {
         if method.eq_ignore_ascii_case("sendChatAction") {
             return self.call_chat_action(_body, output);
         }
+        if method.eq_ignore_ascii_case("forwardMessage")
+            || method.eq_ignore_ascii_case("copyMessage")
+            || method.eq_ignore_ascii_case("forwardMessages")
+            || method.eq_ignore_ascii_case("copyMessages")
+        {
+            return self.call_forward_messages(method, _body, output);
+        }
         if method.eq_ignore_ascii_case("setMessageReaction") {
             return self.call_message_reaction(_body, output);
         }
@@ -361,6 +368,75 @@ impl TestDcTransport {
         let mut response = [0u8; MAX_FRAME];
         self.call_raw(writer.written(), &mut response)?;
         write_bytes(output, b"true")
+    }
+
+    fn call_forward_messages(
+        &mut self,
+        method: &str,
+        body: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize> {
+        let from_chat_id = json_i64(body, "from_chat_id")?;
+        let to_chat_id = json_i64(body, "chat_id")?;
+        let (ids, id_count) = if let Ok(values) = json_message_ids(body, "message_ids") {
+            values
+        } else {
+            let mut values = [0i32; 100];
+            values[0] = json_i64(body, "message_id")? as i32;
+            (values, 1)
+        };
+        let from_peer = schema_peer(from_chat_id, self.bot_id)?;
+        let to_peer = schema_peer(to_chat_id, self.bot_id)?;
+        let random_seed = message_id()? as i64;
+        let mut random_ids = [0i64; 100];
+        for (index, value) in random_ids.iter_mut().enumerate().take(id_count) {
+            *value = random_seed.wrapping_add(index as i64);
+        }
+        let drop_author = method.eq_ignore_ascii_case("copyMessage")
+            || method.eq_ignore_ascii_case("copyMessages");
+        let mut request = [0u8; 2048];
+        let mut writer = Writer::new(&mut request);
+        schema::serialize(
+            &mut writer,
+            MESSAGES_FORWARD_MESSAGES,
+            &[
+                schema::Value::False,
+                schema::Value::False,
+                schema::Value::False,
+                if drop_author {
+                    schema::Value::True
+                } else {
+                    schema::Value::False
+                },
+                schema::Value::False,
+                schema::Value::False,
+                schema::Value::False,
+                schema::Value::Peer(from_peer),
+                schema::Value::Ints(&ids[..id_count]),
+                schema::Value::Longs(&random_ids[..id_count]),
+                schema::Value::Peer(to_peer),
+                schema::Value::Skip,
+                schema::Value::Skip,
+                schema::Value::Skip,
+                schema::Value::Skip,
+                schema::Value::Skip,
+                schema::Value::Skip,
+                schema::Value::Skip,
+                schema::Value::Skip,
+                schema::Value::Skip,
+            ],
+        )
+        .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        self.call_raw(writer.written(), &mut response)?;
+        let mut json = JsonWriter::new(output);
+        json.write(b"{\"message_id\":")?;
+        json.write_i64(i64::from(ids[0]))?;
+        json.write(b",\"date\":0,\"chat\":{\"id\":")?;
+        json.write_i64(to_chat_id)?;
+        json.write(b",\"type\":\"private\"}")?;
+        json.write(b"}")?;
+        Ok(json.position())
     }
 
     fn call_edit_message_text(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
@@ -514,7 +590,7 @@ fn bool_result(input: &[u8], output: &mut [u8]) -> Result<usize> {
 }
 
 fn core_peer(chat_id: i64, bot_id: i64) -> Result<trlib_core::api::InputPeer> {
-    input_peer_for_chat(chat_id, Some(bot_id), None).map_err(|error| error)
+    input_peer_for_chat(chat_id, Some(bot_id), None)
 }
 
 fn schema_peer(chat_id: i64, bot_id: i64) -> Result<schema::Peer> {
