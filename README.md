@@ -48,8 +48,8 @@ The route shape and response envelope follow the Bot API.  All 185 current
 method names are recognized case-insensitively.  The eight hot-path methods
 (`getMe`, text `sendMessage`, `getUpdates`, `setWebhook`, `deleteWebhook`,
 `getWebhookInfo`, `answerCallbackQuery`, and integer-id `getChat`) have bounded
-typed parsing in the core. Rich `sendMessage` requests with `entities` stay
-borrowed and are converted to MTProto `MessageEntity` objects. The remaining methods are passed as borrowed JSON
+typed parsing in the core. Rich `sendMessage` requests with `entities` and
+basic inline keyboards stay borrowed and are converted to MTProto objects. The remaining methods are passed as borrowed JSON
 to `BotTransport::call_bot_api`, so an embedding MTProto reactor can add a
 mapping without changing the HTTP edge. `getUpdates` is currently a local
 queue hook; a transport reactor must feed it from MTProto updates.

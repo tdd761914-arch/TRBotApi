@@ -44,8 +44,8 @@ curl -sS -X POST \
 Все 185 текущих имён методов распознаются без учёта регистра. Для hot path
 (`getMe`, текстовый `sendMessage`, `getUpdates`, `setWebhook`,
 `deleteWebhook`, `getWebhookInfo`, `answerCallbackQuery` и integer-id `getChat`)
-есть bounded typed parser. Rich `sendMessage` с `entities` остаётся заимствованным
-и конвертируется в MTProto `MessageEntity`. Остальные методы передаются как заимствованный
+есть bounded typed parser. Rich `sendMessage` с `entities` и базовой inline
+keyboard остаётся заимствованным и конвертируется в MTProto objects. Остальные методы передаются как заимствованный
 JSON в `BotTransport::call_bot_api`, поэтому MTProto reactor может добавлять
 mapping без изменения HTTP edge. `getUpdates` пока является локальным queue
 hook: transport reactor должен заполнять его из MTProto updates.
