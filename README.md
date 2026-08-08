@@ -211,4 +211,35 @@ record its wall time and then benchmark `getMe`/`sendMessage` against the
 running edge. Production DC routing and a long-lived MTProto reactor are not
 included in this Test-DC smoke path.
 
+### Two-bot Test-DC measurement (2026-08-08)
+
+Two disposable Test Bot API tokens were authenticated against Test DC 2 with
+`auth.importBotAuthorization` (wrapped in `initConnection`). Each token ran in
+its own release process on loopback with one HTTP worker. Credentials were
+passed through the environment and were not written to the repository.
+
+| Metric | Bot A | Bot B |
+| --- | ---: | ---: |
+| Test-DC authorization | pass | pass |
+| HTTP worker / process threads | 1 / 2 | 1 / 2 |
+| RSS immediately after startup | 2,992 KiB | 2,992 KiB |
+| RSS after 100 requests | 4,160 KiB | 4,192 KiB |
+| peak `VmHWM` during run | 5,432 KiB | 5,360 KiB |
+| `smaps_rollup` PSS after run | 2,719 KiB | 2,823 KiB |
+| virtual address space (`VmSize`) | 72,052 KiB | 72,052 KiB |
+| 100 local `getMe` requests | 4.353 s | 4.258 s |
+| loopback rate (fresh `curl` per request) | 22.97 req/s | 23.49 req/s |
+| mean / p50 / p95 latency | 2.545 / 2.125 / 5.498 ms | 2.853 / 2.284 / 5.782 ms |
+
+The release executable used for this run was 1,381,200 bytes (`size`:
+`text+data+bss = 1,356,106` bytes). `getMe` is the allocation-light local
+fast path, so these request numbers measure the HTTP parser, routing and JSON
+writer; they do **not** measure a Telegram RPC round trip. The Test-DC auth
+handshake is live, but the current reference transport needs an entity cache
+with an `access_hash` before it can address an arbitrary user chat. RSS includes
+the process/runtime and allocator state; PSS is the better estimate of private
+RAM. Do not multiply the two process RSS values to predict a sharded process:
+code pages and other read-only mappings can be shared, while active MTProto
+frame buffers are workload-dependent.
+
 TRBotApi is MIT licensed.

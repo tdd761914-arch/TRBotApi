@@ -183,4 +183,34 @@ time cargo run --release -p trbotapi-server
 замерить `getMe`/`sendMessage` через работающий edge. Production DC routing и
 долгоживущий MTProto reactor в этот Test-DC smoke path не входят.
 
+### Измерение двух ботов на Test DC (2026-08-08)
+
+Два одноразовых токена Test Bot API успешно прошли `auth.importBotAuthorization`
+на Test DC 2 (запрос обёрнут в `initConnection`). Каждый токен запускался в
+своём release-процессе на loopback с одним HTTP worker. Секреты передавались
+через environment и не записывались в репозиторий.
+
+| Метрика | Бот A | Бот B |
+| --- | ---: | ---: |
+| Авторизация на Test DC | pass | pass |
+| HTTP worker / потоков процесса | 1 / 2 | 1 / 2 |
+| RSS сразу после запуска | 2 992 KiB | 2 992 KiB |
+| RSS после 100 запросов | 4 160 KiB | 4 192 KiB |
+| пик `VmHWM` за запуск | 5 432 KiB | 5 360 KiB |
+| PSS (`smaps_rollup`) после запуска | 2 719 KiB | 2 823 KiB |
+| виртуальное пространство (`VmSize`) | 72 052 KiB | 72 052 KiB |
+| 100 локальных запросов `getMe` | 4,353 с | 4,258 с |
+| loopback rate (новый `curl` на запрос) | 22,97 req/s | 23,49 req/s |
+| среднее / p50 / p95 | 2,545 / 2,125 / 5,498 мс | 2,853 / 2,284 / 5,782 мс |
+
+Размер release-бинарника в этом запуске — 1 381 200 байт (`size`:
+`text+data+bss = 1 356 106` байт). `getMe` — локальный fast path без
+аллокаций, поэтому эти цифры измеряют HTTP parser, routing и JSON writer, но
+**не** round-trip Telegram RPC. Живой Test-DC handshake проверен; для обращения
+к произвольному пользовательскому чату текущему reference transport ещё нужен
+entity cache с `access_hash`. RSS включает процесс, runtime и состояние
+allocator; PSS лучше показывает приватную RAM. RSS двух процессов нельзя просто
+умножать для оценки shard-процесса: code pages могут быть общими, а MTProto
+frame buffers зависят от нагрузки.
+
 TRBotApi распространяется под MIT.

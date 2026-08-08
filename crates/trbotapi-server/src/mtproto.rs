@@ -14,7 +14,8 @@ use trbotapi_core::{
     Error, ErrorKind, Result, input_peer_for_chat, rpc_result_body, write_import_bot_authorization,
 };
 use trlib_core::api::{
-    parse_auth_response, write_delete_messages, write_edit_message_text, write_log_out,
+    ApiContext, parse_auth_response, write_delete_messages, write_edit_message_text,
+    write_init_connection_prefix, write_log_out,
 };
 use trlib_core::auth_key::{AuthKeyHandshake, AuthKeyMaterial, RandomSource};
 use trlib_core::crypto::{AuthKeyRef, CryptoDirection, RustCrypto, SessionCrypto};
@@ -132,13 +133,42 @@ impl TestDcTransport {
             random,
             bot_id: 0,
         };
-        let mut import = [0u8; 1024];
-        let import_len = write_import_bot_authorization(&mut import, api_id, api_hash, bot_token)?;
+        // Telegram requires the first encrypted RPC after the key exchange to
+        // initialize the application connection.  Wrapping the bot import in
+        // invokeWithLayer(initConnection(...)) also keeps the MTProto path
+        // compatible with the official Test DC (otherwise it returns
+        // CONNECTION_NOT_INITED before looking at the token).
+        let mut import = [0u8; 4096];
+        let mut writer = Writer::new(&mut import);
+        let context = ApiContext::new(
+            api_id,
+            api_hash,
+            "trbotapi",
+            "linux",
+            env!("CARGO_PKG_VERSION"),
+            "en",
+            "",
+            "en",
+        );
+        write_init_connection_prefix(&mut writer, context).map_err(Error::from)?;
+        let import_start = writer.position();
+        drop(writer);
+        let import_len = write_import_bot_authorization(
+            &mut import[import_start..],
+            api_id,
+            api_hash,
+            bot_token,
+        )?;
+        let request_len = import_start + import_len;
         let mut result = vec![0u8; MAX_FRAME];
-        let result_len = value.call_raw(&import[..import_len], &mut result)?;
+        let result_len = value.call_raw(&import[..request_len], &mut result)?;
         match parse_auth_response(&result[..result_len]).map_err(Error::from)? {
             trlib_core::api::AuthResponse::Authorized(_) => Ok(value),
             trlib_core::api::AuthResponse::RpcError(error) => {
+                eprintln!(
+                    "TRBotApi Test DC auth RPC error: code={} message={:?}",
+                    error.code, error.message
+                );
                 Err(Error::new(ErrorKind::InvalidToken, 0, error.code as u32))
             }
             _ => Err(Error::new(ErrorKind::InvalidState, 0, 0)),
