@@ -190,7 +190,7 @@ time cargo run --release -p trbotapi-server
 своём release-процессе на loopback с одним HTTP worker. Секреты передавались
 через environment и не записывались в репозиторий.
 
-| Метрика | Бот A | Бот B |
+| Метрика | Бот `5001248621` | Бот `5001783103` |
 | --- | ---: | ---: |
 | Авторизация на Test DC | pass | pass |
 | HTTP worker / потоков процесса | 1 / 2 | 1 / 2 |

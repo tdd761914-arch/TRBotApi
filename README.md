@@ -218,7 +218,7 @@ Two disposable Test Bot API tokens were authenticated against Test DC 2 with
 its own release process on loopback with one HTTP worker. Credentials were
 passed through the environment and were not written to the repository.
 
-| Metric | Bot A | Bot B |
+| Metric | Bot `5001248621` | Bot `5001783103` |
 | --- | ---: | ---: |
 | Test-DC authorization | pass | pass |
 | HTTP worker / process threads | 1 / 2 | 1 / 2 |
