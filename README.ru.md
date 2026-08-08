@@ -14,8 +14,8 @@ TRBotApi — лёгкий HTTP-шлюз Telegram Bot API поверх zero-copy 
 
 - `trbotapi-core` — `no_std` bounded JSON parser, полный текущий каталог из
   185 имён [Bot API](https://core.telegram.org/bots/api#available-methods),
-  `auth.importBotAuthorization`, `users.getFullUser`, text `sendMessage` и
-  извлечение `rpc_result`.
+  `auth.importBotAuthorization`, `users.getFullUser`, text/rich `sendMessage`,
+  URL media, media groups и извлечение `rpc_result`.
 - `trbotapi-server` — небольшой HTTP/1.1 edge на `std`, per-bot locks,
   bounded update queue и trait `BotTransport` для epoll/io_uring runtime.
 - `trbotapi.conf` — профиль без секретов.
@@ -44,7 +44,8 @@ curl -sS -X POST \
 Все 185 текущих имён методов распознаются без учёта регистра. Для hot path
 (`getMe`, текстовый `sendMessage`, `getUpdates`, `setWebhook`,
 `deleteWebhook`, `getWebhookInfo`, `answerCallbackQuery` и integer-id `getChat`)
-есть bounded typed parser. Остальные методы передаются как заимствованный
+есть bounded typed parser. Rich `sendMessage` с `entities` остаётся заимствованным
+и конвертируется в MTProto `MessageEntity`. Остальные методы передаются как заимствованный
 JSON в `BotTransport::call_bot_api`, поэтому MTProto reactor может добавлять
 mapping без изменения HTTP edge. `getUpdates` пока является локальным queue
 hook: transport reactor должен заполнять его из MTProto updates.
@@ -97,12 +98,14 @@ AST.
 ветка `main`, используемая здесь, остаётся лёгкой.
 
 HTTP-слой принимает полный каталог методов. Bundled Test-DC transport уже
-имеет mapping для login, `getMe`/текстового `sendMessage`, logout/close,
-delete/forward/copy/edit/reaction сообщений, chat actions и базового набора
-basic-group (title/description/pin/leave/member-count). Остальные media,
-sticker, payment, inline, business, passport и story методы проходят в transport
-hook, но требуют отдельных TL mapping и конвертации результата Bot API. До
-фактической production-совместимости с полным Bot API нужны:
+имеет mapping для login, `getMe`/текстового и rich `sendMessage`, URL-based
+`sendPhoto`/document-family, `sendMediaGroup`, location/venue/contact/dice/poll,
+delete/forward/copy/edit/reaction сообщений, chat actions, `answerInlineQuery`
+для article results и запросов `getStickerSet`/`getCustomEmojiStickers`.
+Multipart upload, Telegram `file_id` decoding, полноценная конвертация sticker
+documents/file_id и inline result types кроме article требуют embedding media
+cache. Остальные payment, business, passport и story методы проходят в
+transport hook. До фактической production-совместимости с полным Bot API нужны:
 
 1. production MTProto transport с DC migration, reconnect, server-salt repair
    и загрузкой auth key/session;

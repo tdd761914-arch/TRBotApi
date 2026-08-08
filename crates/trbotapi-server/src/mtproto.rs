@@ -20,17 +20,28 @@ use trlib_core::auth_key::{AuthKeyHandshake, AuthKeyMaterial, RandomSource};
 use trlib_core::crypto::{AuthKeyRef, CryptoDirection, RustCrypto, SessionCrypto};
 use trlib_core::generated::messages::{
     MESSAGES_DELETE_CHAT_USER, MESSAGES_EDIT_CHAT_ABOUT, MESSAGES_EDIT_CHAT_TITLE,
-    MESSAGES_FORWARD_MESSAGES, MESSAGES_GET_FULL_CHAT, MESSAGES_SEND_MESSAGE,
-    MESSAGES_SEND_REACTION, MESSAGES_SET_TYPING, MESSAGES_UNPIN_ALL_MESSAGES,
+    MESSAGES_EDIT_MESSAGE, MESSAGES_FORWARD_MESSAGES, MESSAGES_GET_CUSTOM_EMOJI_DOCUMENTS,
+    MESSAGES_GET_FULL_CHAT, MESSAGES_GET_STICKER_SET, MESSAGES_SEND_MEDIA, MESSAGES_SEND_MESSAGE,
+    MESSAGES_SEND_MULTI_MEDIA, MESSAGES_SEND_REACTION, MESSAGES_SET_INLINE_BOT_RESULTS,
+    MESSAGES_SET_TYPING, MESSAGES_STICKER_SET, MESSAGES_UNPIN_ALL_MESSAGES,
     MESSAGES_UPDATE_PINNED_MESSAGE,
 };
 use trlib_core::generated::{
-    INPUT_USER_SELF, REACTION_EMOJI, SEND_MESSAGE_CANCEL_ACTION,
-    SEND_MESSAGE_CHOOSE_CONTACT_ACTION, SEND_MESSAGE_CHOOSE_STICKER_ACTION,
-    SEND_MESSAGE_GEO_LOCATION_ACTION, SEND_MESSAGE_RECORD_AUDIO_ACTION,
-    SEND_MESSAGE_RECORD_VIDEO_ACTION, SEND_MESSAGE_TYPING_ACTION, SEND_MESSAGE_UPLOAD_AUDIO_ACTION,
-    SEND_MESSAGE_UPLOAD_DOCUMENT_ACTION, SEND_MESSAGE_UPLOAD_PHOTO_ACTION,
-    SEND_MESSAGE_UPLOAD_VIDEO_ACTION,
+    INPUT_BOT_INLINE_MESSAGE_TEXT, INPUT_BOT_INLINE_RESULT, INPUT_GEO_POINT, INPUT_MEDIA_CONTACT,
+    INPUT_MEDIA_DICE, INPUT_MEDIA_DOCUMENT_EXTERNAL, INPUT_MEDIA_GEO_POINT,
+    INPUT_MEDIA_PHOTO_EXTERNAL, INPUT_MEDIA_POLL, INPUT_REPLY_TO_MESSAGE, INPUT_SINGLE_MEDIA,
+    INPUT_STICKER_SET_SHORT_NAME, INPUT_USER_SELF, MESSAGE_ENTITY_BLOCKQUOTE, MESSAGE_ENTITY_BOLD,
+    MESSAGE_ENTITY_BOT_COMMAND, MESSAGE_ENTITY_CASHTAG, MESSAGE_ENTITY_CODE,
+    MESSAGE_ENTITY_CUSTOM_EMOJI, MESSAGE_ENTITY_EMAIL, MESSAGE_ENTITY_HASHTAG,
+    MESSAGE_ENTITY_ITALIC, MESSAGE_ENTITY_MENTION, MESSAGE_ENTITY_MENTION_NAME,
+    MESSAGE_ENTITY_PHONE, MESSAGE_ENTITY_PRE, MESSAGE_ENTITY_SPOILER, MESSAGE_ENTITY_STRIKE,
+    MESSAGE_ENTITY_TEXT_URL, MESSAGE_ENTITY_UNDERLINE, MESSAGE_ENTITY_URL, POLL, POLL_ANSWER,
+    REACTION_EMOJI, SEND_MESSAGE_CANCEL_ACTION, SEND_MESSAGE_CHOOSE_CONTACT_ACTION,
+    SEND_MESSAGE_CHOOSE_STICKER_ACTION, SEND_MESSAGE_GEO_LOCATION_ACTION,
+    SEND_MESSAGE_RECORD_AUDIO_ACTION, SEND_MESSAGE_RECORD_VIDEO_ACTION, SEND_MESSAGE_TYPING_ACTION,
+    SEND_MESSAGE_UPLOAD_AUDIO_ACTION, SEND_MESSAGE_UPLOAD_DOCUMENT_ACTION,
+    SEND_MESSAGE_UPLOAD_PHOTO_ACTION, SEND_MESSAGE_UPLOAD_VIDEO_ACTION, STICKER_SET,
+    TEXT_WITH_ENTITIES,
 };
 use trlib_core::mtproto::{
     ExternalEnvelope, OutboundMessage, encode_encrypted, parse_decrypted, parse_external,
@@ -230,6 +241,39 @@ impl BotTransport for TestDcTransport {
     }
 
     fn call_bot_api(&mut self, method: &str, _body: &[u8], output: &mut [u8]) -> Result<usize> {
+        if method.eq_ignore_ascii_case("sendMessage") {
+            return self.call_rich_send_message(_body, output);
+        }
+        if method.eq_ignore_ascii_case("sendPhoto")
+            || method.eq_ignore_ascii_case("sendVideo")
+            || method.eq_ignore_ascii_case("sendAnimation")
+            || method.eq_ignore_ascii_case("sendAudio")
+            || method.eq_ignore_ascii_case("sendDocument")
+            || method.eq_ignore_ascii_case("sendVoice")
+            || method.eq_ignore_ascii_case("sendVideoNote")
+            || method.eq_ignore_ascii_case("sendSticker")
+            || method.eq_ignore_ascii_case("sendLocation")
+            || method.eq_ignore_ascii_case("sendVenue")
+            || method.eq_ignore_ascii_case("sendContact")
+            || method.eq_ignore_ascii_case("sendDice")
+        {
+            return self.call_media(method, _body, output);
+        }
+        if method.eq_ignore_ascii_case("sendPoll") {
+            return self.call_poll(_body, output);
+        }
+        if method.eq_ignore_ascii_case("sendMediaGroup") {
+            return self.call_media_group(_body, output);
+        }
+        if method.eq_ignore_ascii_case("answerInlineQuery") {
+            return self.call_answer_inline_query(_body, output);
+        }
+        if method.eq_ignore_ascii_case("getStickerSet") {
+            return self.call_get_sticker_set(_body, output);
+        }
+        if method.eq_ignore_ascii_case("getCustomEmojiStickers") {
+            return self.call_get_custom_emoji_stickers(_body, output);
+        }
         if method.eq_ignore_ascii_case("logOut") || method.eq_ignore_ascii_case("close") {
             return self.call_logout(output);
         }
@@ -279,6 +323,393 @@ impl BotTransport for TestDcTransport {
 }
 
 impl TestDcTransport {
+    fn call_rich_send_message(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        let text = json_string(body, "text")?;
+        let peer = core_peer(chat_id, self.bot_id)?;
+        let reply_to = json_i64(body, "reply_to_message_id")
+            .or_else(|_| json_i64(body, "message_id_to_reply"))
+            .ok();
+        let entities = json_array_field(body, "entities");
+        let entity_count = entities.map(count_array_objects).unwrap_or(0);
+        let mut flags = 0u32;
+        if json_bool(body, "disable_web_page_preview").unwrap_or(false) {
+            flags |= 1 << 1;
+        }
+        if json_bool(body, "disable_notification").unwrap_or(false) {
+            flags |= 1 << 5;
+        }
+        if json_bool(body, "protect_content").unwrap_or(false) {
+            flags |= 1 << 14;
+        }
+        if reply_to.is_some() {
+            flags |= 1;
+        }
+        if entity_count != 0 {
+            flags |= 1 << 3;
+        }
+
+        let mut request = [0u8; 64 * 1024];
+        let mut writer = Writer::new(&mut request);
+        writer
+            .write_constructor(MESSAGES_SEND_MESSAGE)
+            .map_err(Error::from)?;
+        writer.write_i64(0).map_err(Error::from)?;
+        writer.write_u32(flags).map_err(Error::from)?;
+        peer.write(&mut writer).map_err(Error::from)?;
+        if let Some(reply_to) = reply_to {
+            writer
+                .write_constructor(INPUT_REPLY_TO_MESSAGE)
+                .map_err(Error::from)?;
+            writer.write_u32(0).map_err(Error::from)?;
+            writer.write_i32(reply_to as i32).map_err(Error::from)?;
+        }
+        writer.write_string(text).map_err(Error::from)?;
+        writer
+            .write_i64(message_id()? as i64)
+            .map_err(Error::from)?;
+        if entity_count != 0 {
+            writer.write_constructor(VECTOR).map_err(Error::from)?;
+            writer.write_i32(entity_count as i32).map_err(Error::from)?;
+            write_entities(&mut writer, entities.unwrap_or(&[]), entity_count)?;
+        }
+        let mut response = [0u8; MAX_FRAME];
+        let length = self.call_raw(writer.written(), &mut response)?;
+        let (message_id, date) = sent_message_values(&response[..length]).unwrap_or((0, 0));
+        write_message_json(output, message_id, date, chat_id, text)
+    }
+
+    fn call_media(&mut self, method: &str, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        let peer = core_peer(chat_id, self.bot_id)?;
+        let reply_to = json_i64(body, "reply_to_message_id").ok();
+        let caption = json_string(body, "caption").unwrap_or("");
+        let entities = json_array_field(body, "caption_entities");
+        let entity_count = entities.map(count_array_objects).unwrap_or(0);
+        let mut flags = 0u32;
+        if json_bool(body, "disable_notification").unwrap_or(false) {
+            flags |= 1 << 5;
+        }
+        if json_bool(body, "protect_content").unwrap_or(false) {
+            flags |= 1 << 14;
+        }
+        if reply_to.is_some() {
+            flags |= 1;
+        }
+        if entity_count != 0 {
+            flags |= 1 << 3;
+        }
+
+        let mut request = [0u8; 64 * 1024];
+        let mut writer = Writer::new(&mut request);
+        writer
+            .write_constructor(MESSAGES_SEND_MEDIA)
+            .map_err(Error::from)?;
+        writer.write_u32(flags).map_err(Error::from)?;
+        peer.write(&mut writer).map_err(Error::from)?;
+        if let Some(reply_to) = reply_to {
+            writer
+                .write_constructor(INPUT_REPLY_TO_MESSAGE)
+                .map_err(Error::from)?;
+            writer.write_u32(0).map_err(Error::from)?;
+            writer.write_i32(reply_to as i32).map_err(Error::from)?;
+        }
+        write_input_media(&mut writer, method, body)?;
+        writer.write_string(caption).map_err(Error::from)?;
+        writer
+            .write_i64(message_id()? as i64)
+            .map_err(Error::from)?;
+        if entity_count != 0 {
+            writer.write_constructor(VECTOR).map_err(Error::from)?;
+            writer.write_i32(entity_count as i32).map_err(Error::from)?;
+            write_entities(&mut writer, entities.unwrap_or(&[]), entity_count)?;
+        }
+        let mut response = [0u8; MAX_FRAME];
+        let length = self.call_raw(writer.written(), &mut response)?;
+        let (message_id, date) = sent_message_values(&response[..length]).unwrap_or((0, 0));
+        write_message_json(output, message_id, date, chat_id, caption)
+    }
+
+    fn call_media_group(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        let peer = core_peer(chat_id, self.bot_id)?;
+        let media = json_array_field(body, "media")
+            .ok_or_else(|| Error::new(ErrorKind::MissingField, 0, 0))?;
+        let count = count_array_objects(media);
+        if count == 0 || count > 10 {
+            return Err(Error::new(ErrorKind::InvalidValue, 0, 10));
+        }
+        let reply_to = json_i64(body, "reply_to_message_id").ok();
+        let mut request = [0u8; 64 * 1024];
+        let mut writer = Writer::new(&mut request);
+        writer
+            .write_constructor(MESSAGES_SEND_MULTI_MEDIA)
+            .map_err(Error::from)?;
+        writer
+            .write_u32(if reply_to.is_some() { 1 } else { 0 })
+            .map_err(Error::from)?;
+        peer.write(&mut writer).map_err(Error::from)?;
+        if let Some(reply_to) = reply_to {
+            writer
+                .write_constructor(INPUT_REPLY_TO_MESSAGE)
+                .map_err(Error::from)?;
+            writer.write_u32(0).map_err(Error::from)?;
+            writer.write_i32(reply_to as i32).map_err(Error::from)?;
+        }
+        writer.write_constructor(VECTOR).map_err(Error::from)?;
+        writer.write_i32(count as i32).map_err(Error::from)?;
+        let mut cursor = JsonArrayCursor::new(media)?;
+        while let Some(item) = cursor.next()? {
+            let kind = json_string(item, "type")?;
+            if !matches!(kind, "photo" | "video" | "audio" | "document") {
+                return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+            }
+            let source = json_string(item, "media")?;
+            if !(source.starts_with("http://") || source.starts_with("https://")) {
+                return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+            }
+            writer
+                .write_constructor(INPUT_SINGLE_MEDIA)
+                .map_err(Error::from)?;
+            let entities = json_array_field(item, "caption_entities");
+            let entity_count = entities.map(count_array_objects).unwrap_or(0);
+            writer
+                .write_u32(if entity_count == 0 { 0 } else { 1 })
+                .map_err(Error::from)?;
+            if kind == "photo" {
+                writer
+                    .write_constructor(INPUT_MEDIA_PHOTO_EXTERNAL)
+                    .map_err(Error::from)?;
+                writer.write_u32(0).map_err(Error::from)?;
+                writer.write_string(source).map_err(Error::from)?;
+            } else {
+                writer
+                    .write_constructor(INPUT_MEDIA_DOCUMENT_EXTERNAL)
+                    .map_err(Error::from)?;
+                writer.write_u32(0).map_err(Error::from)?;
+                writer.write_string(source).map_err(Error::from)?;
+            }
+            writer
+                .write_i64(message_id()? as i64)
+                .map_err(Error::from)?;
+            writer
+                .write_string(json_string(item, "caption").unwrap_or(""))
+                .map_err(Error::from)?;
+            if entity_count != 0 {
+                writer.write_constructor(VECTOR).map_err(Error::from)?;
+                writer.write_i32(entity_count as i32).map_err(Error::from)?;
+                write_entities(&mut writer, entities.unwrap_or(&[]), entity_count)?;
+            }
+        }
+        let mut response = [0u8; MAX_FRAME];
+        let length = self.call_raw(writer.written(), &mut response)?;
+        let (message_id, date) = sent_message_values(&response[..length]).unwrap_or((0, 0));
+        let mut json = JsonWriter::new(output);
+        json.write(b"[{\"message_id\":")?;
+        json.write_i64(i64::from(message_id))?;
+        json.write(b",\"date\":")?;
+        json.write_i64(i64::from(date))?;
+        json.write(b",\"chat\":{\"id\":")?;
+        json.write_i64(chat_id)?;
+        json.write(b",\"type\":\"private\"}]")?;
+        Ok(json.position())
+    }
+
+    fn call_poll(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let chat_id = json_i64(body, "chat_id")?;
+        let peer = core_peer(chat_id, self.bot_id)?;
+        let question = json_string(body, "question")?;
+        let options = json_array_field(body, "options")
+            .ok_or_else(|| Error::new(ErrorKind::MissingField, 0, 0))?;
+        let option_count = count_array_objects(options);
+        if !(2..=10).contains(&option_count) {
+            return Err(Error::new(ErrorKind::InvalidValue, 0, 10));
+        }
+        let reply_to = json_i64(body, "reply_to_message_id").ok();
+        let mut flags = 0u32;
+        if !json_bool(body, "is_anonymous").unwrap_or(true) {
+            flags |= 1 << 1;
+        }
+        if json_bool(body, "allows_multiple_answers").unwrap_or(false) {
+            flags |= 1 << 2;
+        }
+        if json_bool(body, "type").unwrap_or(false)
+            || json_string(body, "type").ok() == Some("quiz")
+        {
+            flags |= 1 << 3;
+        }
+        let close_period = json_i64(body, "open_period").ok();
+        let close_date = json_i64(body, "close_date").ok();
+        if close_period.is_some() {
+            flags |= 1 << 4;
+        }
+        if close_date.is_some() {
+            flags |= 1 << 5;
+        }
+
+        let mut request = [0u8; 64 * 1024];
+        let mut writer = Writer::new(&mut request);
+        writer
+            .write_constructor(MESSAGES_SEND_MEDIA)
+            .map_err(Error::from)?;
+        let mut send_flags = 0u32;
+        if json_bool(body, "disable_notification").unwrap_or(false) {
+            send_flags |= 1 << 5;
+        }
+        if json_bool(body, "protect_content").unwrap_or(false) {
+            send_flags |= 1 << 14;
+        }
+        if reply_to.is_some() {
+            send_flags |= 1;
+        }
+        let explanation_entities = json_array_field(body, "explanation_entities");
+        let explanation_entity_count = explanation_entities.map(count_array_objects).unwrap_or(0);
+        if explanation_entity_count != 0 {
+            send_flags |= 1 << 3;
+        }
+        writer.write_u32(send_flags).map_err(Error::from)?;
+        peer.write(&mut writer).map_err(Error::from)?;
+        if let Some(reply_to) = reply_to {
+            writer
+                .write_constructor(INPUT_REPLY_TO_MESSAGE)
+                .map_err(Error::from)?;
+            writer.write_u32(0).map_err(Error::from)?;
+            writer.write_i32(reply_to as i32).map_err(Error::from)?;
+        }
+        writer
+            .write_constructor(INPUT_MEDIA_POLL)
+            .map_err(Error::from)?;
+        writer.write_u32(0).map_err(Error::from)?;
+        writer.write_constructor(POLL).map_err(Error::from)?;
+        writer.write_i64(0).map_err(Error::from)?;
+        writer.write_u32(flags).map_err(Error::from)?;
+        write_text_with_entities(&mut writer, question)?;
+        writer.write_constructor(VECTOR).map_err(Error::from)?;
+        writer.write_i32(option_count as i32).map_err(Error::from)?;
+        let mut option_cursor = JsonArrayCursor::new(options)?;
+        let mut option_index = 0u8;
+        while let Some(option) = option_cursor.next()? {
+            let option = json_scalar_string(option)?;
+            writer.write_constructor(POLL_ANSWER).map_err(Error::from)?;
+            writer.write_u32(0).map_err(Error::from)?;
+            write_text_with_entities(&mut writer, option)?;
+            writer.write_bytes(&[option_index]).map_err(Error::from)?;
+            option_index = option_index.wrapping_add(1);
+        }
+        if let Some(close_period) = close_period {
+            writer.write_i32(close_period as i32).map_err(Error::from)?;
+        }
+        if let Some(close_date) = close_date {
+            writer.write_i32(close_date as i32).map_err(Error::from)?;
+        }
+        writer.write_i64(0).map_err(Error::from)?;
+        writer
+            .write_string(json_string(body, "explanation").unwrap_or(""))
+            .map_err(Error::from)?;
+        writer
+            .write_i64(message_id()? as i64)
+            .map_err(Error::from)?;
+        if explanation_entity_count != 0 {
+            writer.write_constructor(VECTOR).map_err(Error::from)?;
+            writer
+                .write_i32(explanation_entity_count as i32)
+                .map_err(Error::from)?;
+            write_entities(
+                &mut writer,
+                explanation_entities.unwrap_or(&[]),
+                explanation_entity_count,
+            )?;
+        }
+        let mut response = [0u8; MAX_FRAME];
+        let length = self.call_raw(writer.written(), &mut response)?;
+        let (message_id, date) = sent_message_values(&response[..length]).unwrap_or((0, 0));
+        write_message_json(output, message_id, date, chat_id, question)
+    }
+
+    fn call_answer_inline_query(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let query_id = json_i64(body, "inline_query_id")?;
+        let results = json_array_field(body, "results")
+            .ok_or_else(|| Error::new(ErrorKind::MissingField, 0, 0))?;
+        let result_count = count_array_objects(results);
+        if result_count > 50 {
+            return Err(Error::new(ErrorKind::LimitExceeded, 0, 50));
+        }
+        let mut flags = 0u32;
+        if json_bool(body, "is_personal").unwrap_or(false) {
+            flags |= 1 << 1;
+        }
+        let next_offset = json_string(body, "next_offset").ok();
+        if next_offset.is_some() {
+            flags |= 1 << 2;
+        }
+        let mut request = [0u8; 64 * 1024];
+        let mut writer = Writer::new(&mut request);
+        writer
+            .write_constructor(MESSAGES_SET_INLINE_BOT_RESULTS)
+            .map_err(Error::from)?;
+        writer.write_u32(flags).map_err(Error::from)?;
+        writer.write_i64(query_id).map_err(Error::from)?;
+        writer.write_constructor(VECTOR).map_err(Error::from)?;
+        writer.write_i32(result_count as i32).map_err(Error::from)?;
+        write_inline_results(&mut writer, results, result_count)?;
+        writer
+            .write_i32(json_i64(body, "cache_time").unwrap_or(300) as i32)
+            .map_err(Error::from)?;
+        if let Some(next_offset) = next_offset {
+            writer.write_string(next_offset).map_err(Error::from)?;
+        }
+        let mut response = [0u8; MAX_FRAME];
+        let length = self.call_raw(writer.written(), &mut response)?;
+        bool_result(&response[..length], output)
+    }
+
+    fn call_get_sticker_set(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let name = json_string(body, "name")?;
+        let mut request = [0u8; 256];
+        let mut writer = Writer::new(&mut request);
+        schema::serialize(
+            &mut writer,
+            MESSAGES_GET_STICKER_SET,
+            &[
+                schema::Value::Boxed(INPUT_STICKER_SET_SHORT_NAME, &[schema::Value::Str(name)]),
+                schema::Value::Int(0),
+            ],
+        )
+        .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        let length = self.call_raw(writer.written(), &mut response)?;
+        // Keep the conversion bounded and explicit: the TL set has been
+        // fetched successfully, while file-id/document conversion belongs to
+        // the media cache.  Returning the set metadata avoids inventing
+        // unusable file ids when no media cache is configured.
+        let title = sticker_set_title(&response[..length]).unwrap_or("");
+        let mut json = JsonWriter::new(output);
+        json.write(b"{\"name\":")?;
+        json.write_json_string(name)?;
+        json.write(b",\"title\":")?;
+        json.write_json_string(title)?;
+        json.write(b",\"is_animated\":false,\"is_video\":false,\"stickers\":[]}")?;
+        Ok(json.position())
+    }
+
+    fn call_get_custom_emoji_stickers(&mut self, body: &[u8], output: &mut [u8]) -> Result<usize> {
+        let (ids, count) = json_long_ids(body, "sticker_ids")?;
+        let mut request = [0u8; 2 * 1024];
+        let mut writer = Writer::new(&mut request);
+        schema::serialize(
+            &mut writer,
+            MESSAGES_GET_CUSTOM_EMOJI_DOCUMENTS,
+            &[schema::Value::Longs(&ids[..count])],
+        )
+        .map_err(Error::from)?;
+        let mut response = [0u8; MAX_FRAME];
+        self.call_raw(writer.written(), &mut response)?;
+        // The actual file_id is produced by the embedding media cache.  Do
+        // not fabricate one from a document id; an empty valid array is safer
+        // than returning unusable identifiers.
+        write_bytes(output, b"[]")
+    }
+
     fn call_logout(&mut self, output: &mut [u8]) -> Result<usize> {
         let mut request = [0u8; 32];
         let mut writer = Writer::new(&mut request);
@@ -454,8 +885,23 @@ impl TestDcTransport {
         let peer = core_peer(chat_id, self.bot_id)?;
         let mut request = [0u8; 8 * 1024];
         let mut writer = Writer::new(&mut request);
-        write_edit_message_text(&mut writer, peer, message_id, text, false, false)
-            .map_err(Error::from)?;
+        let entities = json_array_field(body, "entities");
+        let entity_count = entities.map(count_array_objects).unwrap_or(0);
+        if entity_count == 0 {
+            write_edit_message_text(&mut writer, peer, message_id, text, false, false)
+                .map_err(Error::from)?;
+        } else {
+            writer
+                .write_constructor(MESSAGES_EDIT_MESSAGE)
+                .map_err(Error::from)?;
+            writer.write_u32(1 << 3 | 1 << 11).map_err(Error::from)?;
+            peer.write(&mut writer).map_err(Error::from)?;
+            writer.write_i32(message_id).map_err(Error::from)?;
+            writer.write_string(text).map_err(Error::from)?;
+            writer.write_constructor(VECTOR).map_err(Error::from)?;
+            writer.write_i32(entity_count as i32).map_err(Error::from)?;
+            write_entities(&mut writer, entities.unwrap_or(&[]), entity_count)?;
+        }
         let mut response = [0u8; MAX_FRAME];
         self.call_raw(writer.written(), &mut response)?;
         let mut json = JsonWriter::new(output);
@@ -601,6 +1047,279 @@ impl TestDcTransport {
     }
 }
 
+fn write_text_with_entities(writer: &mut Writer<'_>, text: &str) -> Result<()> {
+    writer
+        .write_constructor(TEXT_WITH_ENTITIES)
+        .map_err(Error::from)?;
+    writer.write_string(text).map_err(Error::from)?;
+    writer.write_constructor(VECTOR).map_err(Error::from)?;
+    writer.write_i32(0).map_err(Error::from)
+}
+
+fn write_input_media(writer: &mut Writer<'_>, method: &str, body: &[u8]) -> Result<()> {
+    if method.eq_ignore_ascii_case("sendLocation") {
+        let latitude = json_f64(body, "latitude")?;
+        let longitude = json_f64(body, "longitude")?;
+        writer
+            .write_constructor(INPUT_MEDIA_GEO_POINT)
+            .map_err(Error::from)?;
+        writer
+            .write_constructor(INPUT_GEO_POINT)
+            .map_err(Error::from)?;
+        writer.write_u32(0).map_err(Error::from)?;
+        writer.write_u64(latitude.to_bits()).map_err(Error::from)?;
+        writer.write_u64(longitude.to_bits()).map_err(Error::from)
+    } else if method.eq_ignore_ascii_case("sendVenue") {
+        let latitude = json_f64(body, "latitude")?;
+        let longitude = json_f64(body, "longitude")?;
+        writer
+            .write_constructor(trlib_core::generated::INPUT_MEDIA_VENUE)
+            .map_err(Error::from)?;
+        writer
+            .write_constructor(INPUT_GEO_POINT)
+            .map_err(Error::from)?;
+        writer.write_u32(0).map_err(Error::from)?;
+        writer.write_u64(latitude.to_bits()).map_err(Error::from)?;
+        writer.write_u64(longitude.to_bits()).map_err(Error::from)?;
+        writer
+            .write_string(json_string(body, "title")?)
+            .map_err(Error::from)?;
+        writer
+            .write_string(json_string(body, "address")?)
+            .map_err(Error::from)?;
+        writer.write_string("foursquare").map_err(Error::from)?;
+        writer
+            .write_string(json_string(body, "foursquare_id").unwrap_or(""))
+            .map_err(Error::from)?;
+        writer
+            .write_string(json_string(body, "foursquare_type").unwrap_or(""))
+            .map_err(Error::from)
+    } else if method.eq_ignore_ascii_case("sendContact") {
+        writer
+            .write_constructor(INPUT_MEDIA_CONTACT)
+            .map_err(Error::from)?;
+        writer
+            .write_string(json_string(body, "phone_number")?)
+            .map_err(Error::from)?;
+        writer
+            .write_string(json_string(body, "first_name")?)
+            .map_err(Error::from)?;
+        writer
+            .write_string(json_string(body, "last_name").unwrap_or(""))
+            .map_err(Error::from)?;
+        writer
+            .write_string(json_string(body, "vcard").unwrap_or(""))
+            .map_err(Error::from)
+    } else if method.eq_ignore_ascii_case("sendDice") {
+        writer
+            .write_constructor(INPUT_MEDIA_DICE)
+            .map_err(Error::from)?;
+        writer
+            .write_string(json_string(body, "emoji").unwrap_or("🎲"))
+            .map_err(Error::from)
+    } else {
+        let key = if method.eq_ignore_ascii_case("sendPhoto") {
+            "photo"
+        } else if method.eq_ignore_ascii_case("sendVideo") {
+            "video"
+        } else if method.eq_ignore_ascii_case("sendAnimation") {
+            "animation"
+        } else if method.eq_ignore_ascii_case("sendAudio") {
+            "audio"
+        } else if method.eq_ignore_ascii_case("sendDocument") {
+            "document"
+        } else if method.eq_ignore_ascii_case("sendVoice") {
+            "voice"
+        } else if method.eq_ignore_ascii_case("sendVideoNote") {
+            "video_note"
+        } else {
+            "sticker"
+        };
+        let source = json_string(body, key)?;
+        if !(source.starts_with("http://") || source.starts_with("https://")) {
+            return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+        }
+        if method.eq_ignore_ascii_case("sendPhoto") {
+            writer
+                .write_constructor(INPUT_MEDIA_PHOTO_EXTERNAL)
+                .map_err(Error::from)?;
+            writer.write_u32(0).map_err(Error::from)?;
+            writer.write_string(source).map_err(Error::from)
+        } else {
+            writer
+                .write_constructor(INPUT_MEDIA_DOCUMENT_EXTERNAL)
+                .map_err(Error::from)?;
+            writer.write_u32(0).map_err(Error::from)?;
+            writer.write_string(source).map_err(Error::from)
+        }
+    }
+}
+
+fn write_entities(writer: &mut Writer<'_>, array: &[u8], expected: usize) -> Result<()> {
+    let mut cursor = JsonArrayCursor::new(array)?;
+    let mut count = 0usize;
+    while let Some(object) = cursor.next()? {
+        if count == expected {
+            return Err(Error::new(ErrorKind::InvalidValue, 0, expected as u32));
+        }
+        write_entity(writer, object)?;
+        count += 1;
+    }
+    if count != expected {
+        return Err(Error::new(ErrorKind::InvalidValue, 0, count as u32));
+    }
+    Ok(())
+}
+
+fn write_entity(writer: &mut Writer<'_>, object: &[u8]) -> Result<()> {
+    let kind = json_string(object, "type")?;
+    let offset = json_i64(object, "offset")? as i32;
+    let length = json_i64(object, "length")? as i32;
+    let constructor = if kind == "mention" {
+        MESSAGE_ENTITY_MENTION
+    } else if kind == "hashtag" {
+        MESSAGE_ENTITY_HASHTAG
+    } else if kind == "cashtag" {
+        MESSAGE_ENTITY_CASHTAG
+    } else if kind == "bot_command" {
+        MESSAGE_ENTITY_BOT_COMMAND
+    } else if kind == "url" {
+        MESSAGE_ENTITY_URL
+    } else if kind == "email" {
+        MESSAGE_ENTITY_EMAIL
+    } else if kind == "phone_number" {
+        MESSAGE_ENTITY_PHONE
+    } else if kind == "bold" {
+        MESSAGE_ENTITY_BOLD
+    } else if kind == "italic" {
+        MESSAGE_ENTITY_ITALIC
+    } else if kind == "underline" {
+        MESSAGE_ENTITY_UNDERLINE
+    } else if kind == "strikethrough" {
+        MESSAGE_ENTITY_STRIKE
+    } else if kind == "spoiler" {
+        MESSAGE_ENTITY_SPOILER
+    } else if kind == "code" {
+        MESSAGE_ENTITY_CODE
+    } else if kind == "pre" {
+        MESSAGE_ENTITY_PRE
+    } else if kind == "text_link" {
+        MESSAGE_ENTITY_TEXT_URL
+    } else if kind == "text_mention" {
+        MESSAGE_ENTITY_MENTION_NAME
+    } else if kind == "custom_emoji" {
+        MESSAGE_ENTITY_CUSTOM_EMOJI
+    } else if kind == "blockquote" {
+        MESSAGE_ENTITY_BLOCKQUOTE
+    } else {
+        return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+    };
+    writer.write_constructor(constructor).map_err(Error::from)?;
+    if kind == "blockquote" {
+        writer.write_u32(0).map_err(Error::from)?;
+    }
+    writer.write_i32(offset).map_err(Error::from)?;
+    writer.write_i32(length).map_err(Error::from)?;
+    match kind {
+        "pre" => writer
+            .write_string(json_string(object, "language").unwrap_or(""))
+            .map_err(Error::from),
+        "text_link" => writer
+            .write_string(json_string(object, "url")?)
+            .map_err(Error::from),
+        "text_mention" => writer
+            .write_i64(json_i64(object, "user_id").or_else(|_| json_i64(object, "id"))?)
+            .map_err(Error::from),
+        "custom_emoji" => writer
+            .write_i64(json_i64(object, "custom_emoji_id")?)
+            .map_err(Error::from),
+        _ => Ok(()),
+    }
+}
+
+fn write_inline_results(writer: &mut Writer<'_>, array: &[u8], expected: usize) -> Result<()> {
+    let mut cursor = JsonArrayCursor::new(array)?;
+    let mut count = 0usize;
+    while let Some(object) = cursor.next()? {
+        if count == expected {
+            return Err(Error::new(ErrorKind::InvalidValue, 0, expected as u32));
+        }
+        let kind = json_string(object, "type")?;
+        if kind != "article" {
+            return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+        }
+        let id = json_string(object, "id")?;
+        let message = json_string(object, "message_text")?;
+        let title = json_string(object, "title").ok();
+        let description = json_string(object, "description").ok();
+        let url = json_string(object, "url").ok();
+        let mut flags = 0u32;
+        if title.is_some() {
+            flags |= 1 << 1;
+        }
+        if description.is_some() {
+            flags |= 1 << 2;
+        }
+        if url.is_some() {
+            flags |= 1 << 3;
+        }
+        writer
+            .write_constructor(INPUT_BOT_INLINE_RESULT)
+            .map_err(Error::from)?;
+        writer.write_u32(flags).map_err(Error::from)?;
+        writer.write_string(id).map_err(Error::from)?;
+        writer.write_string(kind).map_err(Error::from)?;
+        if let Some(title) = title {
+            writer.write_string(title).map_err(Error::from)?;
+        }
+        if let Some(description) = description {
+            writer.write_string(description).map_err(Error::from)?;
+        }
+        if let Some(url) = url {
+            writer.write_string(url).map_err(Error::from)?;
+        }
+        let entities = json_array_field(object, "entities");
+        let entity_count = entities.map(count_array_objects).unwrap_or(0);
+        writer
+            .write_constructor(INPUT_BOT_INLINE_MESSAGE_TEXT)
+            .map_err(Error::from)?;
+        writer
+            .write_u32(if entity_count == 0 { 0 } else { 1 << 1 })
+            .map_err(Error::from)?;
+        writer.write_string(message).map_err(Error::from)?;
+        if entity_count != 0 {
+            writer.write_constructor(VECTOR).map_err(Error::from)?;
+            writer.write_i32(entity_count as i32).map_err(Error::from)?;
+            write_entities(&mut *writer, entities.unwrap_or(&[]), entity_count)?;
+        }
+        count += 1;
+    }
+    if count != expected {
+        return Err(Error::new(ErrorKind::InvalidValue, 0, count as u32));
+    }
+    Ok(())
+}
+
+fn write_message_json(
+    output: &mut [u8],
+    message_id: i32,
+    date: i32,
+    chat_id: i64,
+    text: &str,
+) -> Result<usize> {
+    let mut json = JsonWriter::new(output);
+    json.write(b"{\"message_id\":")?;
+    json.write_i64(i64::from(message_id))?;
+    json.write(b",\"date\":")?;
+    json.write_i64(i64::from(date))?;
+    json.write(b",\"chat\":{\"id\":")?;
+    json.write_i64(chat_id)?;
+    json.write(b",\"type\":\"private\"},\"text\":")?;
+    json.write_json_string(text)?;
+    json.write(b"}")?;
+    Ok(json.position())
+}
+
 fn write_bytes(output: &mut [u8], value: &[u8]) -> Result<usize> {
     if value.len() > output.len() {
         return Err(Error::new(ErrorKind::OutputTooSmall, 0, value.len() as u32));
@@ -616,6 +1335,23 @@ fn bool_result(input: &[u8], output: &mut [u8]) -> Result<usize> {
         BOOL_FALSE => write_bytes(output, b"false"),
         id => Err(Error::new(ErrorKind::Wire, 0, id.get())),
     }
+}
+
+fn sticker_set_title(input: &[u8]) -> Option<&str> {
+    let mut cursor = Cursor::new(input);
+    if cursor.read_constructor().ok()? != MESSAGES_STICKER_SET {
+        return None;
+    }
+    if cursor.read_constructor().ok()? != STICKER_SET {
+        return None;
+    }
+    let flags = cursor.read_u32().ok()?;
+    if flags & 1 != 0 {
+        cursor.read_i32().ok()?;
+    }
+    cursor.read_i64().ok()?;
+    cursor.read_i64().ok()?;
+    cursor.read_string().ok().map(|value| value.as_str())
 }
 
 fn chat_participant_count(input: &[u8]) -> Result<i32> {
@@ -767,6 +1503,178 @@ fn json_message_ids(input: &[u8], key: &str) -> Result<([i32; 100], usize)> {
         return Err(Error::new(ErrorKind::InvalidValue, 0, 0));
     }
     Ok((ids, count))
+}
+
+fn json_long_ids(input: &[u8], key: &str) -> Result<([i64; 100], usize)> {
+    let array =
+        json_array_field(input, key).ok_or_else(|| Error::new(ErrorKind::MissingField, 0, 0))?;
+    let mut values = [0i64; 100];
+    let mut count = 0usize;
+    let mut cursor = JsonArrayCursor::new(array)?;
+    while let Some(value) = cursor.next()? {
+        if count == values.len() {
+            return Err(Error::new(ErrorKind::LimitExceeded, 0, 100));
+        }
+        let text =
+            core::str::from_utf8(value).map_err(|_| Error::new(ErrorKind::InvalidValue, 0, 0))?;
+        let text = text.trim();
+        let text = text
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or(text);
+        values[count] = text
+            .parse::<i64>()
+            .map_err(|_| Error::new(ErrorKind::InvalidValue, 0, 0))?;
+        count += 1;
+    }
+    if count == 0 {
+        return Err(Error::new(ErrorKind::InvalidValue, 0, 0));
+    }
+    Ok((values, count))
+}
+
+fn json_f64(input: &[u8], key: &str) -> Result<f64> {
+    let value = json_field(input, key).ok_or_else(|| Error::new(ErrorKind::MissingField, 0, 0))?;
+    let end = value
+        .iter()
+        .position(|byte| matches!(*byte, b',' | b'}' | b']' | b' ' | b'\n' | b'\r' | b'\t'))
+        .unwrap_or(value.len());
+    core::str::from_utf8(&value[..end])
+        .map_err(|_| Error::new(ErrorKind::InvalidValue, 0, 0))?
+        .parse::<f64>()
+        .map_err(|_| Error::new(ErrorKind::InvalidValue, 0, 0))
+}
+
+fn json_scalar_string(value: &[u8]) -> Result<&str> {
+    let value = core::str::from_utf8(value)
+        .map_err(|_| Error::new(ErrorKind::InvalidValue, 0, 0))?
+        .trim();
+    if value.len() < 2 || !value.starts_with('"') || !value.ends_with('"') {
+        return Err(Error::new(ErrorKind::InvalidValue, 0, 0));
+    }
+    let value = &value[1..value.len() - 1];
+    if value.as_bytes().contains(&b'\\') {
+        return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+    }
+    Ok(value)
+}
+
+fn json_array_field<'a>(input: &'a [u8], key: &str) -> Option<&'a [u8]> {
+    let value = json_field(input, key)?;
+    if value.first() != Some(&b'[') {
+        return None;
+    }
+    let end = json_value_end(value, 0).ok()?;
+    Some(&value[..end])
+}
+
+fn count_array_objects(array: &[u8]) -> usize {
+    let mut cursor = match JsonArrayCursor::new(array) {
+        Ok(cursor) => cursor,
+        Err(_) => return 0,
+    };
+    let mut count = 0usize;
+    while let Ok(Some(_)) = cursor.next() {
+        count = count.saturating_add(1);
+    }
+    count
+}
+
+struct JsonArrayCursor<'a> {
+    input: &'a [u8],
+    position: usize,
+    done: bool,
+}
+
+impl<'a> JsonArrayCursor<'a> {
+    fn new(input: &'a [u8]) -> Result<Self> {
+        if input.first() != Some(&b'[') {
+            return Err(Error::new(ErrorKind::InvalidValue, 0, 0));
+        }
+        Ok(Self {
+            input,
+            position: 1,
+            done: false,
+        })
+    }
+
+    fn next(&mut self) -> Result<Option<&'a [u8]>> {
+        if self.done {
+            return Ok(None);
+        }
+        while matches!(
+            self.input.get(self.position),
+            Some(b' ' | b'\n' | b'\r' | b'\t' | b',')
+        ) {
+            self.position += 1;
+        }
+        if self.input.get(self.position) == Some(&b']') {
+            self.done = true;
+            return Ok(None);
+        }
+        let start = self.position;
+        let end = json_value_end(self.input, start)?;
+        self.position = end;
+        Ok(Some(&self.input[start..end]))
+    }
+}
+
+fn json_value_end(input: &[u8], start: usize) -> Result<usize> {
+    let mut position = start;
+    while matches!(input.get(position), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+        position += 1;
+    }
+    let first = *input
+        .get(position)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidJson, position, 0))?;
+    if first == b'"' {
+        position += 1;
+        while let Some(byte) = input.get(position).copied() {
+            position += 1;
+            if byte == b'\\' {
+                position += 1;
+            } else if byte == b'"' {
+                return Ok(position);
+            }
+        }
+        return Err(Error::new(ErrorKind::InvalidJson, position, 0));
+    }
+    if first != b'[' && first != b'{' {
+        while let Some(byte) = input.get(position).copied() {
+            if matches!(byte, b',' | b']' | b'}') {
+                break;
+            }
+            position += 1;
+        }
+        return Ok(position);
+    }
+    let open = first;
+    let close = if open == b'[' { b']' } else { b'}' };
+    let mut depth = 0usize;
+    let mut string = false;
+    while let Some(byte) = input.get(position).copied() {
+        position += 1;
+        if string {
+            if byte == b'\\' {
+                position += 1;
+            } else if byte == b'"' {
+                string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => string = true,
+            value if value == open => depth += 1,
+            value if value == close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Ok(position);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(Error::new(ErrorKind::InvalidJson, position, 0))
 }
 
 fn sent_message_values(input: &[u8]) -> Option<(i32, i32)> {
@@ -941,5 +1849,44 @@ impl<'a> JsonWriter<'a> {
             }
         }
         self.write(b"\"")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Writer, write_entities, write_input_media};
+    use trlib_core::generated::{INPUT_MEDIA_PHOTO_EXTERNAL, MESSAGE_ENTITY_BOLD};
+    use trlib_core::tl::Cursor;
+
+    #[test]
+    fn serializes_message_entity_without_an_ast() {
+        let mut output = [0u8; 128];
+        let mut writer = Writer::new(&mut output);
+        let entities = br#"[{"type":"bold","offset":0,"length":5}]"#;
+        write_entities(&mut writer, entities, 1).expect("entity");
+        let mut cursor = Cursor::new(writer.written());
+        assert_eq!(
+            cursor.read_constructor().expect("constructor"),
+            MESSAGE_ENTITY_BOLD
+        );
+        assert_eq!(cursor.read_i32().expect("offset"), 0);
+        assert_eq!(cursor.read_i32().expect("length"), 5);
+    }
+
+    #[test]
+    fn serializes_external_photo_media() {
+        let mut output = [0u8; 128];
+        let mut writer = Writer::new(&mut output);
+        write_input_media(
+            &mut writer,
+            "sendPhoto",
+            br#"{"photo":"https://example.test/p.jpg"}"#,
+        )
+        .expect("media");
+        let mut cursor = Cursor::new(writer.written());
+        assert_eq!(
+            cursor.read_constructor().expect("constructor"),
+            INPUT_MEDIA_PHOTO_EXTERNAL
+        );
     }
 }

@@ -212,6 +212,7 @@ pub fn parse_request<'a>(method: &'a str, input: &'a [u8]) -> Result<BotRequest<
     let mut callback_text = None;
     let mut show_alert = false;
     let mut cache_time = 0u32;
+    let mut rich_send_message = false;
 
     if !cursor.consume(b'}')? {
         loop {
@@ -232,6 +233,14 @@ pub fn parse_request<'a>(method: &'a str, input: &'a [u8]) -> Result<BotRequest<
                     if let Some(value) = cursor.read_optional_object()? {
                         reply_to_message_id = Some(value);
                     }
+                }
+                // Keep the original borrowed object for the transport when
+                // message entities or markup are present.  The compact typed
+                // variant intentionally only covers the allocation-free text
+                // fast path.
+                "entities" | "reply_markup" | "link_preview_options" => {
+                    rich_send_message = true;
+                    cursor.skip_value()?
                 }
                 "offset" => offset = cursor.read_i64()?,
                 "limit" => {
@@ -265,6 +274,11 @@ pub fn parse_request<'a>(method: &'a str, input: &'a [u8]) -> Result<BotRequest<
 
     if method.eq_ignore_ascii_case("getMe") {
         Ok(BotRequest::GetMe)
+    } else if method.eq_ignore_ascii_case("sendMessage") && rich_send_message {
+        Ok(BotRequest::Generic {
+            method,
+            body: input,
+        })
     } else if method.eq_ignore_ascii_case("sendMessage") {
         Ok(BotRequest::SendMessage {
             chat_id: chat_id.ok_or_else(|| Error::missing(0))?,
@@ -930,6 +944,19 @@ mod tests {
                 .expect_err("limit")
                 .kind,
             ErrorKind::InvalidValue
+        );
+    }
+
+    #[test]
+    fn keeps_rich_message_json_borrowed_for_transport() {
+        let body =
+            br#"{"chat_id":7,"text":"hello","entities":[{"type":"bold","offset":0,"length":5}]}"#;
+        assert_eq!(
+            parse_request("sendMessage", body),
+            Ok(BotRequest::Generic {
+                method: "sendMessage",
+                body,
+            })
         );
     }
 

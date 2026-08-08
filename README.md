@@ -15,8 +15,9 @@ evented acceptor, sharded bot registry and a persistent MTProto reactor.
 
 - `trbotapi-core` — `no_std` bounded Bot API request parsing, JSON responses,
   the current 185-method [Bot API catalogue](https://core.telegram.org/bots/api#available-methods),
-  `auth.importBotAuthorization`, `users.getFullUser`, text `sendMessage`, and
-  `rpc_result` extraction.  All buffers are supplied by the caller.
+  `auth.importBotAuthorization`, `users.getFullUser`, text/rich `sendMessage`,
+  URL media, media groups, and `rpc_result` extraction. All buffers are supplied
+  by the caller.
 - `trbotapi-server` — a small `std` HTTP/1.1 reference edge, per-bot locking,
   bounded update queues and a `BotTransport` hook for an epoll/io_uring
   MTProto implementation.
@@ -47,7 +48,8 @@ The route shape and response envelope follow the Bot API.  All 185 current
 method names are recognized case-insensitively.  The eight hot-path methods
 (`getMe`, text `sendMessage`, `getUpdates`, `setWebhook`, `deleteWebhook`,
 `getWebhookInfo`, `answerCallbackQuery`, and integer-id `getChat`) have bounded
-typed parsing in the core.  The remaining methods are passed as borrowed JSON
+typed parsing in the core. Rich `sendMessage` requests with `entities` stay
+borrowed and are converted to MTProto `MessageEntity` objects. The remaining methods are passed as borrowed JSON
 to `BotTransport::call_bot_api`, so an embedding MTProto reactor can add a
 mapping without changing the HTTP edge. `getUpdates` is currently a local
 queue hook; a transport reactor must feed it from MTProto updates.
@@ -118,13 +120,15 @@ the separate [`tdlib-compat` branch](https://github.com/tdd761914-arch/TRLib/tre
 while the TRLib `main` branch used here stays free of that code.
 
 The request layer recognizes the complete current method catalogue. The bundled
-Test-DC transport has direct mappings for login, `getMe`/text `sendMessage`,
-logout/close, message delete/forward/copy/edit/reaction, chat actions, and the
-basic-group title/description/pin/leave/member-count subset. The remaining
-media, sticker, payment, inline, business, passport and story methods are
-forwarded to the transport hook but still require their method-specific TL and
-Bot API result mappings. Before calling it a production-compatible Bot API
-server, add:
+Test-DC transport has direct mappings for login, `getMe`/text and rich
+`sendMessage`, URL-based `sendPhoto`/document-family methods, `sendMediaGroup`,
+location/venue/contact/dice/poll, message delete/forward/copy/edit/reaction,
+chat actions, `answerInlineQuery` for article results, and
+`getStickerSet`/`getCustomEmojiStickers` requests. Multipart upload, Telegram
+`file_id` decoding, full sticker-document/file-id conversion, and non-article
+inline result types require the embedding media cache. The remaining payment,
+business, passport and story methods are forwarded to the transport hook.
+Before calling it a production-compatible Bot API server, add:
 
 1. a production MTProto transport with DC migration, reconnect, server-salt
    repair and auth-key/session loading;
