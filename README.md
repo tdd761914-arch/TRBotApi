@@ -113,6 +113,17 @@ thread per bot.  For hundreds of thousands of mostly idle bots, keep only the
 encrypted session metadata in the registry and activate a connection on demand;
 for active bots, shard reactors by bot/session hash.
 
+### RAM estimate per bot
+
+As a planning estimate, one idle registry entry is roughly **0.5–2 KiB** plus
+the token/name strings and the shared `HashMap` bucket overhead. An entry with
+the bundled `TestDcTransport` adds about **0.3 KiB** for the 256-byte auth key
+material; the operating-system TCP socket buffers are separate. A request can
+temporarily use up to `MAX_FRAME` (1 MiB) while decoding a large MTProto frame,
+but that buffer is not retained per idle bot. These are allocator/OS-dependent
+estimates, not a capacity guarantee; a production reactor should pool frame
+buffers and keep sessions event-driven.
+
 ## Compatibility boundary
 
 This is not the TDLib compatibility branch.  TRLib's TDLib adapter now lives on

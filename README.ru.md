@@ -86,6 +86,17 @@ Reference edge не создаёт поток или blocking socket на каж
 поднимайте соединение по требованию; активные сессии распределяйте по shard
 reactors.
 
+### Оценка RAM на одного бота
+
+Для планирования одна idle-запись registry занимает примерно **0,5–2 KiB**
+плюс строки token/name и общие buckets `HashMap`. Bundled `TestDcTransport`
+добавляет около **0,3 KiB** для 256-байтного auth-key material; TCP buffers ОС
+считаются отдельно. Во время запроса декодирование большого MTProto frame
+может временно использовать до `MAX_FRAME` (1 MiB), но этот буфер не хранится
+на каждом idle-боте. Это оценка, зависящая от allocator/ОС, а не обещание
+capacity; production reactor должен переиспользовать frame buffers и быть
+event-driven.
+
 Для собственного transport реализуйте оба метода trait: `call` для уже
 сериализованных TL-вызовов и `call_bot_api(method, body, output)` для полного
 каталога Bot API. `body` заимствуется из HTTP buffer и не превращается в JSON
