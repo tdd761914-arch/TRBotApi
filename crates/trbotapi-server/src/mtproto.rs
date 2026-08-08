@@ -30,18 +30,19 @@ use trlib_core::generated::{
     INPUT_BOT_INLINE_MESSAGE_TEXT, INPUT_BOT_INLINE_RESULT, INPUT_GEO_POINT, INPUT_MEDIA_CONTACT,
     INPUT_MEDIA_DICE, INPUT_MEDIA_DOCUMENT_EXTERNAL, INPUT_MEDIA_GEO_POINT,
     INPUT_MEDIA_PHOTO_EXTERNAL, INPUT_MEDIA_POLL, INPUT_REPLY_TO_MESSAGE, INPUT_SINGLE_MEDIA,
-    INPUT_STICKER_SET_SHORT_NAME, INPUT_USER_SELF, MESSAGE_ENTITY_BLOCKQUOTE, MESSAGE_ENTITY_BOLD,
+    INPUT_STICKER_SET_SHORT_NAME, INPUT_USER_SELF, KEYBOARD_BUTTON_CALLBACK, KEYBOARD_BUTTON_ROW,
+    KEYBOARD_BUTTON_URL, MESSAGE_ENTITY_BLOCKQUOTE, MESSAGE_ENTITY_BOLD,
     MESSAGE_ENTITY_BOT_COMMAND, MESSAGE_ENTITY_CASHTAG, MESSAGE_ENTITY_CODE,
     MESSAGE_ENTITY_CUSTOM_EMOJI, MESSAGE_ENTITY_EMAIL, MESSAGE_ENTITY_HASHTAG,
     MESSAGE_ENTITY_ITALIC, MESSAGE_ENTITY_MENTION, MESSAGE_ENTITY_MENTION_NAME,
     MESSAGE_ENTITY_PHONE, MESSAGE_ENTITY_PRE, MESSAGE_ENTITY_SPOILER, MESSAGE_ENTITY_STRIKE,
     MESSAGE_ENTITY_TEXT_URL, MESSAGE_ENTITY_UNDERLINE, MESSAGE_ENTITY_URL, POLL, POLL_ANSWER,
-    REACTION_EMOJI, SEND_MESSAGE_CANCEL_ACTION, SEND_MESSAGE_CHOOSE_CONTACT_ACTION,
-    SEND_MESSAGE_CHOOSE_STICKER_ACTION, SEND_MESSAGE_GEO_LOCATION_ACTION,
-    SEND_MESSAGE_RECORD_AUDIO_ACTION, SEND_MESSAGE_RECORD_VIDEO_ACTION, SEND_MESSAGE_TYPING_ACTION,
-    SEND_MESSAGE_UPLOAD_AUDIO_ACTION, SEND_MESSAGE_UPLOAD_DOCUMENT_ACTION,
-    SEND_MESSAGE_UPLOAD_PHOTO_ACTION, SEND_MESSAGE_UPLOAD_VIDEO_ACTION, STICKER_SET,
-    TEXT_WITH_ENTITIES,
+    REACTION_EMOJI, REPLY_INLINE_MARKUP, SEND_MESSAGE_CANCEL_ACTION,
+    SEND_MESSAGE_CHOOSE_CONTACT_ACTION, SEND_MESSAGE_CHOOSE_STICKER_ACTION,
+    SEND_MESSAGE_GEO_LOCATION_ACTION, SEND_MESSAGE_RECORD_AUDIO_ACTION,
+    SEND_MESSAGE_RECORD_VIDEO_ACTION, SEND_MESSAGE_TYPING_ACTION, SEND_MESSAGE_UPLOAD_AUDIO_ACTION,
+    SEND_MESSAGE_UPLOAD_DOCUMENT_ACTION, SEND_MESSAGE_UPLOAD_PHOTO_ACTION,
+    SEND_MESSAGE_UPLOAD_VIDEO_ACTION, STICKER_SET, TEXT_WITH_ENTITIES,
 };
 use trlib_core::mtproto::{
     ExternalEnvelope, OutboundMessage, encode_encrypted, parse_decrypted, parse_external,
@@ -332,6 +333,9 @@ impl TestDcTransport {
             .ok();
         let entities = json_array_field(body, "entities");
         let entity_count = entities.map(count_array_objects).unwrap_or(0);
+        let inline_markup = json_object_field(body, "reply_markup")
+            .and_then(|value| json_array_field(value, "inline_keyboard"));
+        let has_inline_markup = inline_markup.is_some();
         let mut flags = 0u32;
         if json_bool(body, "disable_web_page_preview").unwrap_or(false) {
             flags |= 1 << 1;
@@ -347,6 +351,9 @@ impl TestDcTransport {
         }
         if entity_count != 0 {
             flags |= 1 << 3;
+        }
+        if has_inline_markup {
+            flags |= 1 << 2;
         }
 
         let mut request = [0u8; 64 * 1024];
@@ -368,6 +375,9 @@ impl TestDcTransport {
         writer
             .write_i64(message_id()? as i64)
             .map_err(Error::from)?;
+        if let Some(inline_markup) = inline_markup {
+            write_inline_markup(&mut writer, inline_markup)?;
+        }
         if entity_count != 0 {
             writer.write_constructor(VECTOR).map_err(Error::from)?;
             writer.write_i32(entity_count as i32).map_err(Error::from)?;
@@ -1568,6 +1578,63 @@ fn json_array_field<'a>(input: &'a [u8], key: &str) -> Option<&'a [u8]> {
     Some(&value[..end])
 }
 
+fn json_object_field<'a>(input: &'a [u8], key: &str) -> Option<&'a [u8]> {
+    let value = json_field(input, key)?;
+    if value.first() != Some(&b'{') {
+        return None;
+    }
+    let end = json_value_end(value, 0).ok()?;
+    Some(&value[..end])
+}
+
+fn write_inline_markup(writer: &mut Writer<'_>, rows: &[u8]) -> Result<()> {
+    let mut row_cursor = JsonArrayCursor::new(rows)?;
+    let mut row_count = 0usize;
+    while row_cursor.next()?.is_some() {
+        row_count += 1;
+    }
+    let mut row_cursor = JsonArrayCursor::new(rows)?;
+    writer
+        .write_constructor(REPLY_INLINE_MARKUP)
+        .map_err(Error::from)?;
+    writer.write_constructor(VECTOR).map_err(Error::from)?;
+    writer.write_i32(row_count as i32).map_err(Error::from)?;
+    while let Some(row) = row_cursor.next()? {
+        writer
+            .write_constructor(KEYBOARD_BUTTON_ROW)
+            .map_err(Error::from)?;
+        let mut button_cursor = JsonArrayCursor::new(row)?;
+        let mut button_count = 0usize;
+        while button_cursor.next()?.is_some() {
+            button_count += 1;
+        }
+        writer.write_constructor(VECTOR).map_err(Error::from)?;
+        writer.write_i32(button_count as i32).map_err(Error::from)?;
+        let mut button_cursor = JsonArrayCursor::new(row)?;
+        while let Some(button) = button_cursor.next()? {
+            let text = json_string(button, "text")?;
+            if let Ok(data) = json_string(button, "callback_data") {
+                writer
+                    .write_constructor(KEYBOARD_BUTTON_CALLBACK)
+                    .map_err(Error::from)?;
+                writer.write_u32(0).map_err(Error::from)?;
+                writer.write_string(text).map_err(Error::from)?;
+                writer.write_bytes(data.as_bytes()).map_err(Error::from)?;
+            } else if let Ok(url) = json_string(button, "url") {
+                writer
+                    .write_constructor(KEYBOARD_BUTTON_URL)
+                    .map_err(Error::from)?;
+                writer.write_u32(0).map_err(Error::from)?;
+                writer.write_string(text).map_err(Error::from)?;
+                writer.write_string(url).map_err(Error::from)?;
+            } else {
+                return Err(Error::new(ErrorKind::Unsupported, 0, 0));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn count_array_objects(array: &[u8]) -> usize {
     let mut cursor = match JsonArrayCursor::new(array) {
         Ok(cursor) => cursor,
@@ -1854,8 +1921,11 @@ impl<'a> JsonWriter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Writer, write_entities, write_input_media};
-    use trlib_core::generated::{INPUT_MEDIA_PHOTO_EXTERNAL, MESSAGE_ENTITY_BOLD};
+    use super::{Writer, write_entities, write_inline_markup, write_input_media};
+    use trlib_core::generated::{
+        INPUT_MEDIA_PHOTO_EXTERNAL, KEYBOARD_BUTTON_CALLBACK, KEYBOARD_BUTTON_ROW,
+        MESSAGE_ENTITY_BOLD, REPLY_INLINE_MARKUP,
+    };
     use trlib_core::tl::Cursor;
 
     #[test]
@@ -1887,6 +1957,28 @@ mod tests {
         assert_eq!(
             cursor.read_constructor().expect("constructor"),
             INPUT_MEDIA_PHOTO_EXTERNAL
+        );
+    }
+
+    #[test]
+    fn serializes_inline_keyboard_buttons() {
+        let mut output = [0u8; 256];
+        let mut writer = Writer::new(&mut output);
+        write_inline_markup(&mut writer, br#"[[{"text":"ok","callback_data":"1"}]]"#)
+            .expect("markup");
+        let mut cursor = Cursor::new(writer.written());
+        assert_eq!(
+            cursor.read_constructor().expect("markup"),
+            REPLY_INLINE_MARKUP
+        );
+        assert_eq!(cursor.read_constructor().expect("vector"), super::VECTOR);
+        assert_eq!(cursor.read_i32().expect("rows"), 1);
+        assert_eq!(cursor.read_constructor().expect("row"), KEYBOARD_BUTTON_ROW);
+        assert_eq!(cursor.read_constructor().expect("buttons"), super::VECTOR);
+        assert_eq!(cursor.read_i32().expect("button count"), 1);
+        assert_eq!(
+            cursor.read_constructor().expect("button"),
+            KEYBOARD_BUTTON_CALLBACK
         );
     }
 }
